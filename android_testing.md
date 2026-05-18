@@ -326,3 +326,245 @@ verify(exactly = 1) { mockAnalytics.track("login") }
 
 ---
 
+### Testing ViewModels
+
+ViewModels are the most important unit to test thoroughly. Test every state transition and every event.
+
+```kotlin
+@OptIn(ExperimentalCoroutinesApi::class)
+class UserDetailViewModelTest {
+
+    @get:Rule val mainDispatcherRule = MainDispatcherRule()
+
+    private val fakeGetUserUseCase = FakeGetUserUseCase()
+    private val fakeUpdateUserUseCase = FakeUpdateUserUseCase()
+    private val savedStateHandle = SavedStateHandle(mapOf("userId" to "user-1"))
+
+    private val viewModel by lazy {
+        UserDetailViewModel(savedStateHandle, fakeGetUserUseCase, fakeUpdateUserUseCase)
+    }
+
+    @Test
+    fun `init triggers load and emits Success when user is found`() = runTest {
+        val user = User("user-1", "Alice", "alice@example.com", null)
+        fakeGetUserUseCase.result = Result.success(user)
+
+        val state = viewModel.uiState.value
+
+        assertThat(state).isInstanceOf(UserDetailUiState.Success::class.java)
+        assertThat((state as UserDetailUiState.Success).user).isEqualTo(user)
+    }
+
+    @Test
+    fun `init emits Loading then Success`() = runTest {
+        val user = User("user-1", "Alice", "alice@example.com", null)
+        fakeGetUserUseCase.result = Result.success(user)
+
+        viewModel.uiState.test {
+            assertThat(awaitItem()).isInstanceOf(UserDetailUiState.Loading::class.java)
+            assertThat(awaitItem()).isInstanceOf(UserDetailUiState.Success::class.java)
+            cancelAndConsumeRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `init emits Error with retryable=true when IOException thrown`() = runTest {
+        fakeGetUserUseCase.result = Result.failure(IOException("timeout"))
+
+        val state = viewModel.uiState.value
+
+        assertThat(state).isInstanceOf(UserDetailUiState.Error::class.java)
+        assertThat((state as UserDetailUiState.Error).isRetryable).isTrue()
+    }
+
+    @Test
+    fun `updateName emits ShowSnackbar event on success`() = runTest {
+        val user = User("user-1", "Alice", "alice@example.com", null)
+        fakeGetUserUseCase.result = Result.success(user)
+        fakeUpdateUserUseCase.result = Result.success(Unit)
+
+        viewModel.events.test {
+            viewModel.updateName("Bob")
+            assertThat(awaitItem()).isEqualTo(UserDetailEvent.ShowSnackbar("Name updated"))
+            cancelAndConsumeRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `updateName does nothing when state is not Success`() = runTest {
+        fakeGetUserUseCase.result = Result.failure(RuntimeException("error"))
+        // State is Error, not Success
+
+        viewModel.events.test {
+            viewModel.updateName("Bob")
+            expectNoEvents()
+            cancelAndConsumeRemainingEvents()
+        }
+    }
+}
+
+// Fakes
+class FakeGetUserUseCase : GetUserUseCase(FakeUserRepository()) {
+    var result: Result<User> = Result.failure(NotImplementedError())
+    override suspend fun execute(params: Params): User = result.getOrThrow()
+}
+
+class FakeUpdateUserUseCase : UpdateUserUseCase(FakeUserRepository()) {
+    var result: Result<Unit> = Result.success(Unit)
+    override suspend fun execute(params: Params): Unit = result.getOrThrow()
+}
+```
+
+### Testing Use Cases
+
+Use case tests are the simplest: construct with fakes, invoke, assert.
+
+```kotlin
+class RegisterUserUseCaseTest {
+
+    private val fakeUserRepository = FakeUserRepository()
+    private val fakeAuthRepository = FakeAuthRepository()
+    private val emailValidator = RealEmailValidator()
+
+    private val useCase = RegisterUserUseCase(
+        fakeUserRepository, fakeAuthRepository, emailValidator
+    )
+
+    @Test fun `success with valid input`() = runTest {
+        val result = useCase(RegisterUserUseCase.Params("Alice", "alice@example.com", "Password1"))
+        assertThat(result.isSuccess).isTrue()
+    }
+
+    @Test fun `fails when name is blank`() = runTest {
+        val result = useCase(RegisterUserUseCase.Params("  ", "alice@example.com", "Password1"))
+        assertThat(result.exceptionOrNull()?.message).ignoringCase().contains("name")
+    }
+
+    @Test fun `fails when email is invalid`() = runTest {
+        val result = useCase(RegisterUserUseCase.Params("Alice", "not-an-email", "Password1"))
+        assertThat(result.exceptionOrNull()?.message).ignoringCase().contains("email")
+    }
+
+    @Test fun `fails when password is too short`() = runTest {
+        val result = useCase(RegisterUserUseCase.Params("Alice", "alice@example.com", "Pass1"))
+        assertThat(result.exceptionOrNull()?.message).contains("8 characters")
+    }
+
+    @Test fun `fails when email is already registered`() = runTest {
+        fakeUserRepository.existingEmail = "alice@example.com"
+        val result = useCase(RegisterUserUseCase.Params("Alice", "alice@example.com", "Password1"))
+        assertThat(result.exceptionOrNull()?.message).ignoringCase().contains("already")
+    }
+}
+```
+
+### Testing with MockK
+
+Use MockK when you need to verify call interactions or return sequences that are impractical to fake:
+
+```kotlin
+class AuthInterceptorTest {
+
+    private val sessionManager = mockk<SessionManager>()
+    private val interceptor = AuthInterceptor(sessionManager)
+
+    @Test
+    fun `adds Authorization header when token is present`() {
+        every { sessionManager.getToken() } returns "my-token"
+
+        val chain = buildFakeChain("https://api.example.com/users")
+        interceptor.intercept(chain)
+
+        val captured = slot<Request>()
+        verify { chain.proceed(capture(captured)) }
+        assertThat(captured.captured.header("Authorization")).isEqualTo("Bearer my-token")
+    }
+
+    @Test
+    fun `clears session when server returns 401`() {
+        every { sessionManager.getToken() } returns "expired-token"
+        every { sessionManager.clearSession() } just Runs
+
+        val chain = buildFakeChainWithResponse(401)
+        interceptor.intercept(chain)
+
+        verify(exactly = 1) { sessionManager.clearSession() }
+    }
+
+    @Test
+    fun `does not clear session for 403 responses`() {
+        every { sessionManager.getToken() } returns "valid-token"
+        every { sessionManager.clearSession() } just Runs
+
+        val chain = buildFakeChainWithResponse(403)
+        interceptor.intercept(chain)
+
+        verify(exactly = 0) { sessionManager.clearSession() }
+    }
+
+    private fun buildFakeChain(url: String): Interceptor.Chain {
+        val request = Request.Builder().url(url).build()
+        val chain = mockk<Interceptor.Chain>()
+        every { chain.request() } returns request
+        every { chain.proceed(any()) } returns buildResponse(200, chain)
+        return chain
+    }
+
+    private fun buildFakeChainWithResponse(code: Int): Interceptor.Chain {
+        val chain = mockk<Interceptor.Chain>()
+        every { chain.request() } returns Request.Builder().url("https://api.example.com/me").build()
+        every { chain.proceed(any()) } returns buildResponse(code, chain)
+        return chain
+    }
+
+    private fun buildResponse(code: Int, chain: Interceptor.Chain): Response =
+        Response.Builder()
+            .request(chain.request())
+            .protocol(Protocol.HTTP_1_1)
+            .code(code)
+            .message("")
+            .body(ResponseBody.create(null, ""))
+            .build()
+}
+```
+
+### Testing Flows with Turbine
+
+Turbine provides a clean DSL for asserting on `Flow` emissions in sequence:
+
+```kotlin
+class SearchViewModelTest {
+
+    @get:Rule val mainDispatcherRule = MainDispatcherRule()
+
+    private val fakeSearchUseCase = FakeSearchUsersUseCase()
+    private val viewModel = SearchViewModel(fakeSearchUseCase)
+
+    @Test
+    fun `results emit empty list before query reaches minimum length`() = runTest {
+        viewModel.results.test {
+            assertThat(awaitItem()).isEmpty()  // initial value
+            viewModel.onQueryChanged("a")     // too short
+            expectNoEvents()                  // debounce + length filter
+            cancelAndConsumeRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `results update after debounce with query of 2+ chars`() = runTest {
+        val users = listOf(User("1", "Alice", "alice@example.com", null))
+        fakeSearchUseCase.stubbedResults = users
+
+        viewModel.results.test {
+            assertThat(awaitItem()).isEmpty()
+            viewModel.onQueryChanged("al")
+            mainDispatcherRule.dispatcher.advanceTimeBy(350) // past debounce
+            assertThat(awaitItem()).isEqualTo(users)
+            cancelAndConsumeRemainingEvents()
+        }
+    }
+}
+```
+
+---
+
