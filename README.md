@@ -1,6 +1,6 @@
 # Android Development Docs
 
-### A curated reference set for professional Android development with Kotlin, Jetpack Compose, and Clean Architecture — plus a companion guide for using Claude Code to scaffold features that match these standards.
+### A curated reference set for professional Android development with Kotlin, Jetpack Compose, and Clean Architecture — plus companion guides for using Claude Code *and* Cursor CLI to scaffold features that match these standards.
 
 ## Welcome
 
@@ -22,11 +22,14 @@ Patterns aren't rules to be obeyed; they're **agreements between teammates** so 
 
 ## Contents
 
+This repo currently covers two mobile platforms and two AI coding-agent engines. The engine guides below apply to both platforms — each one explains how to install the agent and wire the platform-specific skills into any project.
+
 | Document | Description | Sections |
 |----------|-------------|----------|
 | [`android_clean_architecture.md`](./android_clean_architecture.md) | Reference guide for professional Android development using Kotlin, Jetpack libraries, and industry-standard architectural patterns — MVVM, SOLID, Coroutines, Data Sources, Repositories, Use Cases, ViewModel, Compose (incl. the Screen / Content pattern), OkHttp, Hilt, Room, SharedPreferences, and COIL. | 15 |
 | [`android_testing.md`](./android_testing.md) | Reference for testing Android applications — the Testing Pyramid, TDD, stubbing & mocking, the Robot pattern, test fixtures, unit tests, integration tests, UI tests with Jetpack Compose Test (Screen vs Content), and screenshot tests with the Jetpack Screenshot Testing plugin. | 9 |
-| [`claude-code.md`](./claude-code.md) | Guide to installing Claude Code on macOS / Linux / Windows, wiring this repository's scaffolding skills into any Android project, and using them to generate code that adheres to the two reference docs above. | 5 |
+| [`claude-code.md`](./claude-code.md) | Guide to installing Claude Code on macOS / Linux / Windows, wiring this repository's scaffolding skills into any iOS or Android project, and using them to generate code that adheres to the platform reference docs below. | 5 |
+| [`cursor-cli.md`](./cursor-cli.md) | Guide to installing Cursor CLI (`cursor-agent`) on macOS / Linux / WSL2, wiring this repository's Cursor-flavoured skills (under `./cursor-skills/`) into any Android project, and using them to generate code that adheres to the platform reference docs below. | 5 |
 
 ## License
 

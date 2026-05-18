@@ -14,7 +14,7 @@
 
 ## 1. What is Claude Code?
 
-Claude Code is Anthropic's official command-line interface for Claude. It runs in your terminal, can read and edit files in your working directory, execute shell commands on your behalf, and load project-scoped configuration — including **skills**, the procedural recipes that this repository ships under `./skills/`. Without Claude Code installed, the markdown files in `./skills/` are just documents; with Claude Code installed and pointed at an Android project, they become executable scaffolding for Clean Architecture features, tests, and module bootstraps.
+Claude Code is Anthropic's official command-line interface for Claude. It runs in your terminal, can read and edit files in your working directory, execute shell commands on your behalf, and load project-scoped configuration — including **skills**, the procedural recipes that this repository ships under `./claude-skills/`. Without Claude Code installed, the markdown files in `./claude-skills/` are just documents; with Claude Code installed and pointed at an Android project, they become executable scaffolding for Clean Architecture features, tests, and module bootstraps.
 
 The skills in this repo are deliberately *narrow and procedural* — each one encodes a single, repeatable task (add a ViewModel, add a Repository, add an integration test) and cross-references specific section numbers in `android_clean_architecture.md` and `android_testing.md`. They turn this docs repository into a working code-generation toolkit.
 
@@ -107,7 +107,7 @@ The first time you run `claude` in any directory, it opens your default browser 
 
 ### 3.1 What is a Skill?
 
-A **skill** is a procedural recipe stored as `./skills/<name>/SKILL.md`, consisting of YAML frontmatter (`name`, `description`, `allowed-tools`) plus a markdown body that tells Claude exactly *how* to perform a single concrete task. When the user's request matches the skill's `description`, or when the user types `/<skill-name>` directly, Claude loads the body and follows it step by step.
+A **skill** is a procedural recipe stored as `./claude-skills/<name>/SKILL.md`, consisting of YAML frontmatter (`name`, `description`, `allowed-tools`) plus a markdown body that tells Claude exactly *how* to perform a single concrete task. When the user's request matches the skill's `description`, or when the user types `/<skill-name>` directly, Claude loads the body and follows it step by step.
 
 Skills are distinct from two adjacent concepts:
 
@@ -118,15 +118,15 @@ Skills sit between the two: they are *on-demand* (loaded only when the descripti
 
 ### 3.2 How the Skills Are Organised
 
-Every skill in this repo is a single `SKILL.md` file inside `./skills/<skill-name>/` — no auxiliary `references/`, `scripts/`, or `assets/` directories, because these skills are pure procedure. Each one cross-references specific section numbers in `android_clean_architecture.md` and `android_testing.md` so the generated code matches the canonical patterns exactly.
+Every skill in this repo is a single `SKILL.md` file inside a platform-scoped folder — `./claude-skills/<skill-name>/` for Android, `./ios/claude-skills/<skill-name>/` for iOS — with no auxiliary `references/`, `scripts/`, or `assets/` directories, because these skills are pure procedure. Each one cross-references specific section numbers in the platform reference docs (`android_clean_architecture.md` + `android_testing.md` for Android, `ios/ios_clean_architecture.md` + `ios/ios_testing.md` for iOS) so the generated code matches the canonical patterns exactly.
 
-The ten skills divide cleanly into three groups:
+Each platform ships ten skills, dividing cleanly into three groups:
 
-- **Scaffolding (1 skill).** `android-create-module` bootstraps the Clean Architecture folder layout.
+- **Scaffolding (1 skill).** Bootstraps the Clean Architecture folder layout (`android-create-module` / `ios-create-module`).
 - **Layer generators (6 skills).** One per architectural layer — HTTP DataSource, Repository, UseCase, ViewModel, Content, Screen — applied in dependency order.
-- **Test generators (3 skills).** Unit tests (JVM), UI tests (instrumented, Content + components), Integration tests (instrumented, Screen + NavHost).
+- **Test generators (3 skills).** Unit tests (host-process), UI tests (Content + components), Integration tests (Screen + navigation).
 
-### 3.3 Skill Catalogue
+### 3.3 Android Skill Catalogue
 
 The table below lists every skill in the order you would typically invoke them while building a new feature — bottom-up through the architecture, then the matching tests at the end. Each row maps to a level-4 detail block immediately afterwards.
 
@@ -268,7 +268,30 @@ The table below lists every skill in the order you would typically invoke them w
 
 ---
 
+### 3.4 iOS Skill Catalogue
+
+The iOS skills mirror the Android catalogue one-for-one, with the `ios-` prefix and slash command. They live under `./ios/claude-skills/` and cite section numbers in `ios/ios_clean_architecture.md` and `ios/ios_testing.md`. The skill bodies are scaffolded today and will be fully authored in Phases 4–5 of the iOS replication plan; the frontmatter `description` lines are final and already drive trigger matching.
+
+| # | Skill | Slash command | Generates |
+|---|-------|--------------|-----------|
+| 1 | `ios-create-module` | `/ios-create-module` | Clean Architecture folder layout (`DI/`, `Domain/`, `Data/`, `Presentation/`) as a local SPM package or a feature folder inside an existing target. |
+| 2 | `ios-add-http-datasource` | `/ios-add-http-datasource` | `URLSession`-based endpoint enum, `RemoteDataSource` protocol + impl, Codable DTOs, Factory `Container` registration. |
+| 3 | `ios-add-repository` | `/ios-add-repository` | Domain-layer protocol, data-layer implementation, Factory `Container` binding. |
+| 4 | `ios-add-use-case` | `/ios-add-use-case` | Business-operation conforming to `UseCase` / `FlowUseCase` / `NoParamsUseCase` (the latter two return `AsyncSequence`). |
+| 5 | `ios-add-view-model` | `/ios-add-view-model` | `@Observable` `@MainActor` class + `UiState` + `Event` enum surfaced as `AsyncStream`. |
+| 6 | `ios-add-content` | `/ios-add-content` | Stateless `XxxContent: View` with `#Preview` per state. |
+| 7 | `ios-add-screen` | `/ios-add-screen` | Stateful `XxxScreen: View` wiring ViewModel via Factory → Content. |
+| 8 | `ios-add-unit-test` | `/ios-add-unit-test` | Swift Testing unit tests for DataSources, Repositories, UseCases, ViewModels. |
+| 9 | `ios-add-ui-test` | `/ios-add-ui-test` | ViewInspector-based UI tests for `XxxContent` and reusable SwiftUI components. |
+| 10 | `ios-add-integration-test` | `/ios-add-integration-test` | Integration tests for `XxxScreen` and `NavigationStack` flows via Factory `Container.reset()` + fakes, plus XCUITest variants. |
+
+Per-skill detail blocks (matching the Android format above) will be added once the corresponding `ios/ios_*.md` sections and SKILL.md bodies are fleshed out.
+
+---
+
 ## 4. Installing the Skills in Another Project
+
+The examples in this section show the Android install path. **The same mechanic applies to iOS** — wherever an example copies `claude-skills/` and the two `android_*.md` references, swap in `ios/claude-skills/` and the two `ios/ios_*.md` references instead. Project layout, scopes, refresh strategies, and skill-resolution rules are identical across platforms.
 
 ### 4.1 Scope: Project vs User
 
@@ -291,7 +314,7 @@ git clone https://github.com/<owner>/android-development-docs.git /tmp/android-d
 
 # Copy the skills into the target Android project
 mkdir -p <your-android-project>/.claude/skills
-cp -R /tmp/android-docs/skills/* <your-android-project>/.claude/skills/
+cp -R /tmp/android-docs/claude-skills/* <your-android-project>/.claude/skills/
 
 # Also copy the canonical reference docs — skills cite them by section number
 cp /tmp/android-docs/android_clean_architecture.md <your-android-project>/
@@ -314,7 +337,7 @@ git clone https://github.com/<owner>/android-development-docs.git /tmp/android-d
 
 # Install skills user-wide
 mkdir -p ~/.claude/skills
-cp -R /tmp/android-docs/skills/* ~/.claude/skills/
+cp -R /tmp/android-docs/claude-skills/* ~/.claude/skills/
 
 # Park the canonical references where the skills can find them
 mkdir -p ~/.claude/docs
@@ -339,13 +362,13 @@ For teams that want skills to track upstream automatically rather than be re-cop
 # Option A — git submodule (pulls full repo into a subdir)
 cd <your-android-project>
 git submodule add https://github.com/<owner>/android-development-docs.git docs/android-skills
-ln -s ../docs/android-skills/skills .claude/skills
+ln -s ../docs/android-skills/claude-skills .claude/skills
 
 # Option B — git sparse-checkout (clone only what you need)
 git clone --filter=blob:none --no-checkout https://github.com/<owner>/android-development-docs.git
 cd android-development-docs
 git sparse-checkout init --cone
-git sparse-checkout set skills android_clean_architecture.md android_testing.md
+git sparse-checkout set claude-skills android_clean_architecture.md android_testing.md
 git checkout
 ```
 
@@ -356,7 +379,7 @@ git checkout
 ```bash
 # Cloned-and-copied (§4.2 or §4.3): re-run the copy after a pull
 cd /tmp/android-docs && git pull
-cp -R skills/* <target>/.claude/skills/
+cp -R claude-skills/* <target>/.claude/skills/
 
 # Submodule
 cd <your-android-project>
@@ -425,7 +448,7 @@ You can also start higher up the stack (e.g. begin with `/android-add-content` a
 
 ### 5.4 Troubleshooting
 
-- **"My skill does not trigger when I type its slash command."** Confirm the directory name (`./skills/<name>/`) matches the `name:` field in the frontmatter exactly — case-sensitive — and that there are no stray characters in the filename (not `SKILL.MD`, not `Skill.md`).
+- **"My skill does not trigger when I type its slash command."** Confirm the directory name (`.claude/skills/<name>/` in the target project, or `./claude-skills/<name>/` in this source repo) matches the `name:` field in the frontmatter exactly — case-sensitive — and that there are no stray characters in the filename (not `SKILL.MD`, not `Skill.md`).
 - **"The skill cites a section that does not exist in my project."** Copy `android_clean_architecture.md` and `android_testing.md` into the target project (or symlink them). The skills reference these files by section number and degrade silently when they are missing.
 - **"Claude does not see my `.claude/skills/` at all."** You probably launched `claude` from a subdirectory. Skills are resolved relative to the project root — `cd` to the root first, or use the user-wide install in §4.3 to make them path-independent.
 - **"I want to disable a skill temporarily."** Either move its directory out of `.claude/skills/`, or rename `SKILL.md` to `SKILL.md.bak`. Claude only loads files whose name is exactly `SKILL.md`.
