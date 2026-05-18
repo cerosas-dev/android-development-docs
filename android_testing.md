@@ -568,3 +568,334 @@ class SearchViewModelTest {
 
 ---
 
+## 4. Integration Tests
+
+### What are Integration Tests?
+
+Integration tests verify that **two or more components work correctly together** — usually at least one of which is a real Android framework dependency (Room database, Hilt injection graph, or a real HTTP server via MockWebServer). They live in `src/androidTest/` and require an emulator or device, unless the framework component can be replaced with an in-process substitute (Room in-memory database can run on the JVM for example via `src/test/` with Robolectric, but the `androidTest` approach is more reliable).
+
+### Why Write Integration Tests?
+
+Unit tests verify individual classes in isolation, but they cannot catch **contract mismatches** between layers: a DAO query that compiles but returns the wrong columns; a Retrofit interface that maps a 404 to the wrong exception type; a Room migration that silently drops a column. Integration tests catch exactly these problems.
+
+### When to Write Integration Tests?
+
+Write an integration test when you need to verify:
+- A Room DAO query returns the correct data for a given schema.
+- A repository correctly coordinates its local and remote data sources.
+- A Hilt module wires dependencies in the correct order.
+- A network layer handles specific HTTP response codes correctly.
+
+---
+
+### Gradle Setup
+
+```kotlin
+// app/build.gradle.kts
+android {
+    defaultConfig {
+        testInstrumentationRunner = "com.example.app.HiltTestRunner"
+    }
+}
+
+dependencies {
+    // Hilt testing
+    androidTestImplementation("com.google.dagger:hilt-android-testing:2.51.1")
+    kaptAndroidTest("com.google.dagger:hilt-android-compiler:2.51.1")
+
+    // Room in-memory database
+    androidTestImplementation("androidx.room:room-testing:2.6.1")
+
+    // MockWebServer — in-process HTTP server for Retrofit/OkHttp tests
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+
+    // AndroidX Test runner and rules
+    androidTestImplementation("androidx.test:runner:1.6.1")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+
+    // MockK for Android (instrumented tests)
+    androidTestImplementation("io.mockk:mockk-android:1.13.10")
+
+    // Truth
+    androidTestImplementation("com.google.truth:truth:1.4.2")
+
+    // Coroutines test
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+}
+```
+
+### Custom Hilt Test Runner
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/HiltTestRunner.kt
+class HiltTestRunner : AndroidJUnitRunner() {
+    override fun newApplication(
+        classLoader: ClassLoader,
+        className: String,
+        context: Context
+    ): Application = super.newApplication(classLoader, HiltTestApplication::class.java.name, context)
+}
+```
+
+---
+
+### Integration Test: Room DAO
+
+The most common integration test: verify DAO queries against a real (in-memory) Room database. These run on device but are the single most reliable way to catch SQL mistakes.
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/data/local/dao/UserDaoTest.kt
+@RunWith(AndroidJUnit4::class)
+@SmallTest
+class UserDaoTest {
+
+    private lateinit var database: AppDatabase
+    private lateinit var userDao: UserDao
+
+    @Before
+    fun setUp() {
+        database = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            AppDatabase::class.java
+        )
+            .allowMainThreadQueries()   // allowed in tests only
+            .build()
+        userDao = database.userDao()
+    }
+
+    @After
+    fun tearDown() = database.close()
+
+    @Test
+    fun upsert_andFindById_returnsInsertedEntity() = runTest {
+        val entity = UserEntity("u1", "Alice", "alice@example.com", null)
+
+        userDao.upsert(entity)
+        val retrieved = userDao.findById("u1")
+
+        assertThat(retrieved).isEqualTo(entity)
+    }
+
+    @Test
+    fun findById_returnsNull_whenNotFound() = runTest {
+        assertThat(userDao.findById("nonexistent")).isNull()
+    }
+
+    @Test
+    fun upsert_updatesExistingRow_whenIdMatches() = runTest {
+        userDao.upsert(UserEntity("u1", "Alice", "alice@example.com", null))
+        userDao.upsert(UserEntity("u1", "Alice Updated", "alice@example.com", null))
+
+        assertThat(userDao.findById("u1")?.name).isEqualTo("Alice Updated")
+    }
+
+    @Test
+    fun observeAll_emitsNewList_afterUpsert() = runTest {
+        val emissions = mutableListOf<List<UserEntity>>()
+        val job = launch { userDao.observeAll().take(2).toList(emissions) }
+
+        userDao.upsert(UserEntity("u1", "Alice", "alice@example.com", null))
+
+        job.join()
+        assertThat(emissions).hasSize(2)          // initial empty + after insert
+        assertThat(emissions[1]).hasSize(1)
+        assertThat(emissions[1][0].name).isEqualTo("Alice")
+    }
+
+    @Test
+    fun deleteById_removesRow() = runTest {
+        userDao.upsert(UserEntity("u1", "Alice", "alice@example.com", null))
+        userDao.deleteById("u1")
+        assertThat(userDao.findById("u1")).isNull()
+    }
+
+    @Test
+    fun search_returnMatchingByName() = runTest {
+        userDao.upsertAll(listOf(
+            UserEntity("u1", "Alice Smith", "a@example.com", null),
+            UserEntity("u2", "Bob Jones",  "b@example.com", null)
+        ))
+
+        val results = userDao.search("alice").first()
+
+        assertThat(results).hasSize(1)
+        assertThat(results[0].id).isEqualTo("u1")
+    }
+}
+```
+
+---
+
+### Integration Test: Repository + Room
+
+Test the repository's cache strategy with a real in-memory DAO and a fake remote data source:
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/data/repository/UserRepositoryIntegrationTest.kt
+@RunWith(AndroidJUnit4::class)
+class UserRepositoryIntegrationTest {
+
+    private lateinit var database: AppDatabase
+    private lateinit var userDao: UserDao
+    private lateinit var fakeRemote: FakeUserRemoteDataSource
+    private lateinit var repository: UserRepositoryImpl
+
+    @Before
+    fun setUp() {
+        database = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            AppDatabase::class.java
+        ).build()
+        userDao    = database.userDao()
+        fakeRemote = FakeUserRemoteDataSource()
+
+        repository = UserRepositoryImpl(
+            remoteDataSource = fakeRemote,
+            localDataSource  = UserLocalDataSourceImpl(userDao),
+            inMemoryCache    = UserInMemoryCache(),
+            networkMonitor   = FakeNetworkMonitor(isConnected = true)
+        )
+    }
+
+    @After fun tearDown() = database.close()
+
+    @Test
+    fun getUser_fetchesFromRemote_andCachesLocally_whenDbIsEmpty() = runTest {
+        fakeRemote.stubbedUser = UserDto("u1", "Alice", "alice@example.com", null)
+
+        val result = repository.getUser("u1")
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(result.getOrThrow().name).isEqualTo("Alice")
+        assertThat(userDao.findById("u1")).isNotNull()   // persisted to local DB
+    }
+
+    @Test
+    fun getUser_returnsFromLocalDb_withoutHittingNetwork_whenCached() = runTest {
+        userDao.upsert(UserEntity("u1", "Alice", "alice@example.com", null))
+
+        val result = repository.getUser("u1")
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(fakeRemote.fetchUserCallCount).isEqualTo(0)
+    }
+
+    @Test
+    fun observeUsers_emitsUpdate_afterRefresh() = runTest {
+        fakeRemote.stubbedUsers = listOf(
+            UserDto("u1", "Alice", "alice@example.com", null),
+            UserDto("u2", "Bob",   "bob@example.com",   null)
+        )
+
+        val results = mutableListOf<List<User>>()
+        val job = launch { repository.observeUsers().take(2).toList(results) }
+
+        repository.refreshUsers()
+        job.join()
+
+        assertThat(results.last()).hasSize(2)
+    }
+}
+```
+
+---
+
+### Integration Test: Network Layer with MockWebServer
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/data/remote/UserApiServiceTest.kt
+@RunWith(AndroidJUnit4::class)
+class UserApiServiceTest {
+
+    private lateinit var mockWebServer: MockWebServer
+    private lateinit var apiService: UserApiService
+
+    @Before
+    fun setUp() {
+        mockWebServer = MockWebServer()
+        mockWebServer.start()
+
+        val retrofit = Retrofit.Builder()
+            .baseUrl(mockWebServer.url("/"))
+            .addConverterFactory(
+                Json { ignoreUnknownKeys = true }
+                    .asConverterFactory("application/json".toMediaType())
+            )
+            .build()
+
+        apiService = retrofit.create(UserApiService::class.java)
+    }
+
+    @After fun tearDown() = mockWebServer.shutdown()
+
+    @Test
+    fun getUser_parsesResponseCorrectly() = runTest {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"user_id":"u1","full_name":"Alice","email_address":"alice@example.com"}""")
+        )
+
+        val dto = apiService.getUser("u1")
+
+        assertThat(dto.userId).isEqualTo("u1")
+        assertThat(dto.fullName).isEqualTo("Alice")
+    }
+
+    @Test
+    fun getUser_throwsHttpException_on404() = runTest {
+        mockWebServer.enqueue(MockResponse().setResponseCode(404))
+
+        val exception = assertThrows(HttpException::class.java) {
+            runBlocking { apiService.getUser("nonexistent") }
+        }
+        assertThat(exception.code()).isEqualTo(404)
+    }
+
+    @Test
+    fun requestIncludesCorrectPath() = runTest {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"user_id":"u1","full_name":"Alice","email_address":"alice@example.com"}"""
+            )
+        )
+
+        apiService.getUser("u1")
+
+        val request = mockWebServer.takeRequest()
+        assertThat(request.path).isEqualTo("/users/u1")
+        assertThat(request.method).isEqualTo("GET")
+    }
+}
+```
+
+### Integration Test: Hilt Component Graph
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/di/DependencyGraphTest.kt
+@HiltAndroidTest
+class DependencyGraphTest {
+
+    @get:Rule val hiltRule = HiltAndroidRule(this)
+
+    @Inject lateinit var userRepository: UserRepository
+    @Inject lateinit var getUserUseCase: GetUserUseCase
+
+    @Before fun inject() = hiltRule.inject()
+
+    @Test
+    fun userRepository_isInjected() {
+        assertThat(userRepository).isNotNull()
+    }
+
+    @Test
+    fun getUserUseCase_isInjected() {
+        assertThat(getUserUseCase).isNotNull()
+    }
+}
+```
+
+---
+
