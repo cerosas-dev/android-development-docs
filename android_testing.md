@@ -65,3 +65,151 @@ Always prefer `src/test/` (JVM) over `src/androidTest/` (device) when possible. 
 
 ---
 
+## 2. Test-Driven Development (TDD)
+
+### What is TDD?
+
+Test-Driven Development is a software development practice in which you write a failing test **before** writing any production code, then write the minimum code needed to make the test pass, then refactor. This cycle repeats for every new behaviour:
+
+```
+  ┌─────────────────────────────────────────────────┐
+  │                                                 │
+  │   1. RED   — Write a failing test               │
+  │       ↓                                         │
+  │   2. GREEN — Write the minimum code to pass it  │
+  │       ↓                                         │
+  │   3. REFACTOR — Clean up without breaking tests │
+  │       ↓                                         │
+  │   (repeat for next behaviour)                   │
+  │                                                 │
+  └─────────────────────────────────────────────────┘
+```
+
+The test defines the contract. The implementation fulfils it. The refactor improves its quality. This order is intentional and non-negotiable in TDD — writing the test first forces you to think about the API before you implement it.
+
+### Why Use TDD?
+
+- **Forces good design.** Hard-to-test code is hard-to-use code. If writing a test for a class is painful, the class probably has too many dependencies or too many responsibilities.
+- **Prevents over-engineering.** You only write code that is needed to pass the current test. No speculative features.
+- **Provides a safety net.** A comprehensive test suite written alongside the code catches regressions immediately.
+- **Produces living documentation.** Tests describe exactly what the code does, in plain test names.
+
+### When to Use TDD?
+
+TDD is most valuable for **business logic** — use cases, domain models, validation rules, state machines. It is less practical for pure UI layout code, framework plumbing (Hilt modules, Room entities), and exploratory prototyping. A pragmatic approach: apply TDD rigorously to the domain and data layers; write tests before or alongside UI and integration layers.
+
+### The TDD Cycle in Android — Full Example
+
+We'll implement a `LoginUseCase` using TDD.
+
+#### Step 1 — RED: Write the failing test first
+
+```kotlin
+// src/test/kotlin/com/example/app/domain/usecase/LoginUseCaseTest.kt
+class LoginUseCaseTest {
+
+    private val fakeAuthRepository = FakeAuthRepository()
+    private val useCase = LoginUseCase(fakeAuthRepository)
+
+    @Test
+    fun `invoke returns AuthToken on valid credentials`() = runTest {
+        fakeAuthRepository.stubbedToken = AuthToken("access123", "refresh456")
+
+        val result = useCase(LoginUseCase.Params("alice@example.com", "Password1"))
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(result.getOrThrow().accessToken).isEqualTo("access123")
+    }
+
+    @Test
+    fun `invoke returns failure when email is blank`() = runTest {
+        val result = useCase(LoginUseCase.Params("", "Password1"))
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()?.message).contains("Email")
+    }
+
+    @Test
+    fun `invoke returns failure when password is shorter than 8 characters`() = runTest {
+        val result = useCase(LoginUseCase.Params("alice@example.com", "Pass1"))
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()?.message).contains("8 characters")
+    }
+
+    @Test
+    fun `invoke returns failure when repository throws`() = runTest {
+        fakeAuthRepository.shouldThrow = IOException("No network")
+
+        val result = useCase(LoginUseCase.Params("alice@example.com", "Password1"))
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(IOException::class.java)
+    }
+}
+
+// Fake used across tests — no mocking needed for simple stubs
+class FakeAuthRepository : AuthRepository {
+    var stubbedToken: AuthToken? = null
+    var shouldThrow: Throwable? = null
+
+    override suspend fun login(email: String, password: String): Result<AuthToken> {
+        shouldThrow?.let { return Result.failure(it) }
+        return Result.success(stubbedToken ?: AuthToken("default", "default"))
+    }
+}
+```
+
+Run: `./gradlew :app:testDebugUnitTest --tests "*LoginUseCaseTest*"`
+Expected: **FAIL** — `LoginUseCase` does not exist yet.
+
+#### Step 2 — GREEN: Write the minimum implementation
+
+```kotlin
+// src/main/kotlin/com/example/app/domain/usecase/LoginUseCase.kt
+class LoginUseCase(private val authRepository: AuthRepository) {
+
+    data class Params(val email: String, val password: String)
+
+    suspend operator fun invoke(params: Params): Result<AuthToken> = runCatching {
+        require(params.email.isNotBlank()) { "Email cannot be blank" }
+        require(params.password.length >= 8) { "Password must be at least 8 characters" }
+        authRepository.login(params.email, params.password).getOrThrow()
+    }
+}
+```
+
+Run: `./gradlew :app:testDebugUnitTest --tests "*LoginUseCaseTest*"`
+Expected: **PASS** — all 4 tests green.
+
+#### Step 3 — REFACTOR: Improve without breaking
+
+```kotlin
+// Extract validation constants to improve readability
+class LoginUseCase(private val authRepository: AuthRepository) {
+
+    data class Params(val email: String, val password: String)
+
+    suspend operator fun invoke(params: Params): Result<AuthToken> = runCatching {
+        validate(params)
+        authRepository.login(params.email, params.password).getOrThrow()
+    }
+
+    private fun validate(params: Params) {
+        require(params.email.isNotBlank())                         { "Email cannot be blank" }
+        require(params.password.length >= MIN_PASSWORD_LENGTH) {
+            "Password must be at least $MIN_PASSWORD_LENGTH characters"
+        }
+    }
+
+    companion object {
+        private const val MIN_PASSWORD_LENGTH = 8
+    }
+}
+```
+
+Run again: `./gradlew :app:testDebugUnitTest --tests "*LoginUseCaseTest*"`
+Expected: **PASS** — all tests still green after refactor.
+
+---
+
