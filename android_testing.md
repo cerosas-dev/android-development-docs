@@ -1181,3 +1181,265 @@ composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
 
 ---
 
+## 6. Screenshot Tests
+
+### What are Screenshot Tests?
+
+Screenshot tests (also called visual regression tests or pixel tests) capture the rendered output of a composable or screen as a reference image — a **golden** — and then compare every subsequent test run against that golden. If any pixel changes, the test fails and shows a diff. This catches accidental visual regressions that would otherwise slip through unit and UI tests.
+
+### Why Write Screenshot Tests?
+
+Unit and UI tests verify **behaviour**, not **appearance**. A UI test that asserts `onNodeWithText("Alice").assertIsDisplayed()` does not notice if the text colour changed from black to white, the card padding doubled, or a shadow disappeared. Screenshot tests fill this gap — they are your safeguard against unintended visual changes during refactoring, dependency upgrades, or theme changes.
+
+### When to Write Screenshot Tests?
+
+Write screenshot tests for:
+- **Design-system components** (buttons, cards, text fields, dialogs) — the building blocks used everywhere.
+- **Complex composables** with conditional rendering (loading / error / empty / success states).
+- **Screens that must match a designer-approved specification** exactly.
+
+Do not write screenshot tests for screens whose visual output changes frequently (e.g., feeds with live data) — these would require constant golden updates.
+
+---
+
+### Jetpack Screenshot Testing (Official Approach — AGP 8.3+)
+
+Google's official screenshot testing toolchain uses the `screenshotTest` Gradle source set introduced in Android Gradle Plugin 8.3. Tests live in `src/screenshotTest/kotlin/`, render Compose previews on the JVM (no emulator required), and produce PNG golden images checked into version control.
+
+#### Gradle Setup
+
+```kotlin
+// project-level build.gradle.kts
+plugins {
+    id("com.android.application") version "8.5.0" apply false
+}
+
+// app/build.gradle.kts
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    compileSdk = 35
+
+    testOptions {
+        screenshotTest {
+            enabled = true
+        }
+    }
+}
+
+dependencies {
+    // Required for rendering @Preview composables in screenshotTest source set
+    screenshotTestImplementation("androidx.compose.ui:ui-tooling:1.6.8")
+}
+```
+
+#### Source Set
+
+Screenshot tests go in a dedicated source set that is separate from both `test/` and `androidTest/`:
+
+```
+app/src/
+├── main/kotlin/                   # Production code
+├── test/kotlin/                   # JVM unit tests
+├── androidTest/kotlin/            # Device instrumented tests
+└── screenshotTest/kotlin/         # Screenshot tests (JVM, no emulator)
+    └── com/example/app/
+        ├── UserCardScreenshotTest.kt
+        └── UserListScreenScreenshotTest.kt
+```
+
+#### Writing Screenshot Tests
+
+Each test class is annotated with `@PreviewScreenshotTest` and calls `captureScreenshot()` on composables decorated with `@Preview`:
+
+```kotlin
+// src/screenshotTest/kotlin/com/example/app/UserCardScreenshotTest.kt
+@RunWith(ParameterizedRobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class UserCardScreenshotTest(private val name: String, private val uiMode: Int) {
+
+    companion object {
+        @JvmStatic
+        @ParameterizedRobolectricTestRunner.Parameters(name = "{0}")
+        fun parameters() = listOf(
+            arrayOf("light", Configuration.UI_MODE_NIGHT_NO),
+            arrayOf("dark",  Configuration.UI_MODE_NIGHT_YES)
+        )
+    }
+
+    @get:Rule
+    val composeTestRule = createComposeRule()
+
+    @Test
+    fun userCard_default() {
+        composeTestRule.captureScreenshot(uiMode = uiMode, fileName = "user_card_$name")
+    }
+
+    private fun ComposeContentTestRule.captureScreenshot(uiMode: Int, fileName: String) {
+        setContent {
+            CompositionLocalProvider(LocalConfiguration provides Configuration().apply {
+                this.uiMode = uiMode
+            }) {
+                AppTheme(darkTheme = uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES) {
+                    UserCard(
+                        user = User("u1", "Alice Smith", "alice@example.com", null),
+                        onUserClick = {}
+                    )
+                }
+            }
+        }
+        onRoot().captureToImage().saveTo(File("src/screenshotTest/screenshots/$fileName.png"))
+    }
+}
+```
+
+#### Using `@PreviewScreenshotTest` Annotation (Simpler Approach)
+
+For composables that already have `@Preview` annotations, the toolchain can auto-generate screenshot tests:
+
+```kotlin
+// Production code — in the main source set
+@Preview(name = "Light Mode", showBackground = true)
+@Preview(name = "Dark Mode", uiMode = Configuration.UI_MODE_NIGHT_YES, showBackground = true)
+@Composable
+fun UserCardPreview() {
+    AppTheme {
+        UserCard(
+            user = User("u1", "Alice Smith", "alice@example.com", null),
+            onUserClick = {}
+        )
+    }
+}
+
+// Screenshot test — in screenshotTest source set
+class UserCardScreenshotTest {
+    @get:Rule val screenshotRule = AndroidComposableScreenshotRule()
+
+    @Test
+    @PreviewScreenshotTest
+    fun userCardPreviews() = screenshotRule.assertPreviews(UserCardPreview::class)
+}
+```
+
+#### Running Screenshot Tests
+
+```bash
+# Generate / update goldens (first run, or after intentional UI changes)
+./gradlew :app:updateDebugScreenshotTest
+
+# Verify against existing goldens (CI — fails on any pixel difference)
+./gradlew :app:verifyDebugScreenshotTest
+
+# View the HTML report with diffs
+open app/build/reports/screenshotTest/debug/verify/index.html
+```
+
+#### Checking Goldens into Version Control
+
+Golden files are PNG images stored in `src/screenshotTest/screenshots/`. They must be committed to version control so CI can compare against them:
+
+```bash
+git add src/screenshotTest/screenshots/
+git commit -m "test: add golden screenshots for UserCard"
+```
+
+---
+
+### What Happens When a Test Fails
+
+When `verifyDebugScreenshotTest` detects a pixel difference, it:
+1. Fails the build.
+2. Generates a diff image in `app/build/outputs/screenshotTest/`.
+3. Produces an HTML report showing the expected, actual, and diff side-by-side.
+
+To accept the change as intentional, re-run `updateDebugScreenshotTest`, review the new goldens, and commit them.
+
+---
+
+### Full Multi-State Screenshot Test Example
+
+```kotlin
+// src/screenshotTest/kotlin/com/example/app/UserDetailScreenshotTest.kt
+class UserDetailScreenshotTest {
+
+    @get:Rule val composeTestRule = createComposeRule()
+
+    @Test
+    fun userDetailSuccess_lightTheme() {
+        composeTestRule.setContent {
+            AppTheme(darkTheme = false) {
+                UserDetailContent(
+                    user = User("u1", "Alice Smith", "alice@example.com", "https://example.com/avatar.jpg")
+                )
+            }
+        }
+        composeTestRule.onRoot().captureToImage()
+            .assertAgainstGolden(screenshotRule, "user_detail_success_light")
+    }
+
+    @Test
+    fun userDetailError_lightTheme() {
+        composeTestRule.setContent {
+            AppTheme(darkTheme = false) {
+                ErrorScreen(message = "User not found", onRetry = {})
+            }
+        }
+        composeTestRule.onRoot().captureToImage()
+            .assertAgainstGolden(screenshotRule, "user_detail_error_light")
+    }
+
+    @Test
+    fun userDetailLoading_lightTheme() {
+        composeTestRule.setContent {
+            AppTheme(darkTheme = false) {
+                LoadingIndicator()
+            }
+        }
+        composeTestRule.onRoot().captureToImage()
+            .assertAgainstGolden(screenshotRule, "user_detail_loading_light")
+    }
+}
+```
+
+---
+
+### Best Practices for Screenshot Tests
+
+| Practice | Reason |
+|----------|--------|
+| Test all visual states (loading, error, empty, success) | Each state is a distinct visual component |
+| Test both light and dark themes | Theme bugs are common and easy to miss |
+| Use fixed preview data — never random or date-based | Flaky goldens from non-deterministic data are useless |
+| Keep composables under test narrow (component, not full screen) | Smaller goldens fail for smaller, more actionable reasons |
+| Store goldens in version control, never in `.gitignore` | CI needs them to detect regressions |
+| Review golden diffs in PRs like you review code changes | Unexpected visual changes should require explicit approval |
+
+---
+
+## License
+
+This document is distributed under the **GNU General Public License v3.0 (GPL-3.0)**.
+
+```
+Android Testing Guide Documentation
+Copyright (C) 2024 — Contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+```
+
+For the full license text, see the [LICENSE](./LICENSE) file in this repository or visit
+<https://www.gnu.org/licenses/gpl-3.0.html>.
