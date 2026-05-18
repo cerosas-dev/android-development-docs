@@ -1141,19 +1141,19 @@ Write a unit test for every non-trivial behaviour: use cases, ViewModel state tr
 // app/build.gradle.kts
 dependencies {
     // JUnit 4 runner
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
 
     // MockK — Kotlin-first mocking library
-    testImplementation("io.mockk:mockk:1.13.10")
+    testImplementation(libs.mockk)
 
     // Kotlin Coroutines test utilities
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation(libs.kotlinx.coroutines.test)
 
     // Google Truth — readable assertions
-    testImplementation("com.google.truth:truth:1.4.2")
+    testImplementation(libs.truth)
 
     // Turbine — Flow testing
-    testImplementation("app.cash.turbine:turbine:1.1.0")
+    testImplementation(libs.turbine)
 }
 ```
 
@@ -1502,28 +1502,28 @@ android {
 
 dependencies {
     // Hilt testing
-    androidTestImplementation("com.google.dagger:hilt-android-testing:2.51.1")
-    kaptAndroidTest("com.google.dagger:hilt-android-compiler:2.51.1")
+    androidTestImplementation(libs.hilt.android.testing)
+    kaptAndroidTest(libs.hilt.android.compiler)
 
     // Room in-memory database
-    androidTestImplementation("androidx.room:room-testing:2.6.1")
+    androidTestImplementation(libs.androidx.room.testing)
 
     // MockWebServer — in-process HTTP server for Retrofit/OkHttp tests
-    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    androidTestImplementation(libs.okhttp.mockwebserver)
 
     // AndroidX Test runner and rules
-    androidTestImplementation("androidx.test:runner:1.6.1")
-    androidTestImplementation("androidx.test:rules:1.6.1")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 
     // MockK for Android (instrumented tests)
-    androidTestImplementation("io.mockk:mockk-android:1.13.10")
+    androidTestImplementation(libs.mockk.android)
 
     // Truth
-    androidTestImplementation("com.google.truth:truth:1.4.2")
+    androidTestImplementation(libs.truth)
 
     // Coroutines test
-    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 ```
 
@@ -1831,21 +1831,21 @@ Do not write UI tests for visual styling (use screenshot tests instead) or pure 
 // app/build.gradle.kts
 dependencies {
     // Compose UI test — core library
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.6.8")
+    androidTestImplementation(libs.compose.ui.test.junit4)
 
     // Needed to host composables in a test Activity
-    debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.8")
+    debugImplementation(libs.compose.ui.test.manifest)
 
     // Hilt for instrumented tests
-    androidTestImplementation("com.google.dagger:hilt-android-testing:2.51.1")
-    kaptAndroidTest("com.google.dagger:hilt-android-compiler:2.51.1")
+    androidTestImplementation(libs.hilt.android.testing)
+    kaptAndroidTest(libs.hilt.android.compiler)
 
     // AndroidX Test
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.rules)
 
     // Truth
-    androidTestImplementation("com.google.truth:truth:1.4.2")
+    androidTestImplementation(libs.truth)
 }
 ```
 
@@ -1921,6 +1921,178 @@ composeTestRule.onNodeWithTag("submit_button").assertIsNotEnabled()
 composeTestRule.onNodeWithTag("email_field").assertTextContains("alice@example.com")
 composeTestRule.onAllNodesWithTag("user_card").assertCountEquals(3)
 ```
+
+---
+
+### Screen vs Content Tests
+
+#### What are Screen and Content Tests?
+
+The production code in this project already splits every screen-level destination into two composables — a stateful `XxxScreen` that wires the ViewModel, Hilt, Navigation, lifecycle, and one-time events, and a stateless `XxxContent` that receives a `UiState` and event lambdas and renders the UI. This is the **Screen / Content pattern** documented in §"Screen / Content Pattern" of `android_clean_architecture.md`. UI tests inherit that same split:
+
+| Test type | Drives | Compose rule | DI graph? | What it proves |
+|-----------|--------|--------------|-----------|----------------|
+| **Content test**  | `XxxContent` directly  | `createComposeRule()` | No  | Rendering of every `UiState` branch and that user interactions invoke the right lambdas. |
+| **Screen test**   | `XxxScreen` end-to-end | `createAndroidComposeRule<HiltTestActivity>()` | Yes (Hilt + fake repositories) | The ViewModel↔Screen↔Content wiring — that real `StateFlow` emissions reach the UI, events fire exactly once, and navigation lambdas are invoked. |
+
+A **Content test** is a flat, isolated unit-style test for a pure composable. There is no `@HiltAndroidTest`, no `@Inject`, no `HiltTestActivity`, no `viewModelScope`, no `NavController`. The test hands `XxxContent` a hand-built `UiState` literal and stub lambdas, then asserts on what was rendered.
+
+A **Screen test** is an integration-style test that boots the Hilt graph, replaces the production repositories with fakes via `@TestInstallIn`, hosts `XxxScreen` inside a `HiltTestActivity`, and lets the real ViewModel run. It proves that the wiring between layers — `Repository → UseCase → ViewModel → Screen → Content` — produces the right pixels for a given backend state.
+
+The two existing worked examples immediately below this subsection — *Testing a Stateless Composable in Isolation* and *Testing a Screen with a ViewModel (Hilt)* — are the canonical Content test and Screen test respectively.
+
+#### Why Split UI Tests Two Ways?
+
+The split is not stylistic — each kind of test pays for a different kind of confidence, and each is bad at what the other is good at:
+
+- **Speed & determinism.** A Content test renders a single composable against a literal `UiState`. No Hilt graph, no test Activity, no coroutine plumbing, no main-dispatcher swap. A Screen test pays for all of that, every test, every method.
+- **State coverage is cheap in Content tests.** Driving the `UiState` directly lets one test class exhaustively cover loading, empty, error, partial-success, success, and odd edge cases (empty strings, very long names, zero items, max items) with a one-line `copy(...)` per case. Reaching those branches via a fake repository in a Screen test is possible but slow and verbose.
+- **Wiring coverage is unique to Screen tests.** Content tests do *not* exercise `collectAsStateWithLifecycle`, the event `Channel`, snackbar plumbing, navigation lambdas, the Hilt graph, or `viewModelScope` cancellation. If you change how the ViewModel publishes state and only Content tests run, the regression slips through.
+- **Refactor stability.** Content tests survive ViewModel rewrites, DI restructures, mapper changes, and even an MVVM → MVI migration, because they only see the `UiState` surface. Screen tests are deliberately fragile to that wiring layer — that is the layer they exist to police.
+- **Preview parity.** Each `@Preview` you write for `XxxContent` has a 1:1 Content-test counterpart — same `UiState` literal, different assertions. If you build a preview, you can build a Content test for free.
+- **Failure locality.** When a Screen test fails, you can ask "does the underlying Content test still pass?" If yes, the bug is in the wiring layer; if no, the bug is in rendering. Two layers of tests give you two layers of blame.
+
+#### When to Write Which?
+
+| Want to verify… | Test type | Rule | Hilt? |
+|-----------------|-----------|------|-------|
+| A specific `UiState` renders correctly | Content | `createComposeRule()` | No |
+| A button click invokes the right lambda | Content | `createComposeRule()` | No |
+| Every branch of a `when (state)` block | Content | `createComposeRule()` | No |
+| Conditional rendering (`if (state.error != null) …`) | Content | `createComposeRule()` | No |
+| ViewModel emits a new state → screen re-renders | Screen | `createAndroidComposeRule<HiltTestActivity>()` | Yes |
+| One-time events (snackbar, navigate) fire exactly once | Screen | `createAndroidComposeRule<HiltTestActivity>()` | Yes |
+| Tapping a row navigates to a new destination | Screen | `createAndroidComposeRule<HiltTestActivity>()` | Yes |
+| Lifecycle resume restarts a paused collection | Screen | `createAndroidComposeRule<HiltTestActivity>()` | Yes |
+
+**Rule of thumb:** *default to a Content test.* Reach for a Screen test only when the wiring layer is exactly what you need to prove. Most screens end up with one Screen test (covering the happy-path wiring + one event) and *N* Content tests (covering every `UiState` branch).
+
+#### How — Content Test (canonical shape)
+
+A Content test feeds `XxxContent` a literal `UiState` and stub lambdas. No `@HiltAndroidTest`, no `@Inject`, no fake repositories:
+
+```kotlin
+@RunWith(AndroidJUnit4::class)
+class UserListContentTest {
+
+    @get:Rule val composeTestRule = createComposeRule()
+
+    @Test
+    fun showsEmptyState_whenNoUsers() {
+        composeTestRule.setContent {
+            AppTheme {
+                UserListContent(
+                    state          = UserListUiState(users = emptyList()),
+                    snackbarHost   = remember { SnackbarHostState() },
+                    onQueryChanged = {}, onUserClick = {}, onRetry = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("No users yet").assertIsDisplayed()
+    }
+
+    @Test
+    fun showsErrorState_whenErrorMessagePresent() {
+        composeTestRule.setContent {
+            AppTheme {
+                UserListContent(
+                    state          = UserListUiState(errorMessage = "Network unavailable"),
+                    snackbarHost   = remember { SnackbarHostState() },
+                    onQueryChanged = {}, onUserClick = {}, onRetry = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Network unavailable").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Retry").assertIsDisplayed()
+    }
+
+    @Test
+    fun clickingRetry_invokesOnRetryLambda() {
+        var retried = false
+        composeTestRule.setContent {
+            AppTheme {
+                UserListContent(
+                    state          = UserListUiState(errorMessage = "boom"),
+                    snackbarHost   = remember { SnackbarHostState() },
+                    onQueryChanged = {}, onUserClick = {}, onRetry = { retried = true }
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Retry").performClick()
+
+        assertThat(retried).isTrue()
+    }
+}
+```
+
+Add one `@Test` per meaningful `UiState` — they should mirror the `@Preview` set defined for `XxxContent` one-for-one. If a state is worth previewing, it is worth a Content test; if it is worth a Content test, it is probably worth a preview.
+
+#### How — Screen Test (canonical shape)
+
+A Screen test boots Hilt, swaps the real repository for a fake via `@TestInstallIn`, and drives `XxxScreen` through a `HiltTestActivity`. It asserts on the *wiring* — that ViewModel emissions reach the UI and that events fire — not on rendering branches the Content test already covers:
+
+```kotlin
+@HiltAndroidTest
+@RunWith(AndroidJUnit4::class)
+class UserListScreenTest {
+
+    @get:Rule(order = 0) val hiltRule = HiltAndroidRule(this)
+    @get:Rule(order = 1) val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    @Inject lateinit var fakeUserRepository: FakeUserRepository
+
+    @Before fun setUp() { hiltRule.inject() }
+
+    @Test
+    fun loadedUsers_fromRepository_renderInTheList() {
+        // Wiring assertion: real ViewModel collects from the real fake → Content renders the result.
+        fakeUserRepository.stubbedUsers = listOf(
+            User("u1", "Alice", "alice@example.com", null),
+            User("u2", "Bob",   "bob@example.com",   null)
+        )
+
+        composeTestRule.setContent {
+            AppTheme { UserListScreen(onNavigateToDetail = {}) }
+        }
+
+        composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Bob").assertIsDisplayed()
+    }
+
+    @Test
+    fun tappingUser_invokesNavigationLambda_exactlyOnce() {
+        // Wiring assertion: a one-time NavigateToDetail event reaches the lambda passed into XxxScreen.
+        fakeUserRepository.stubbedUsers = listOf(User("u1", "Alice", "alice@example.com", null))
+        val navigatedIds = mutableListOf<String>()
+
+        composeTestRule.setContent {
+            AppTheme { UserListScreen(onNavigateToDetail = { navigatedIds += it }) }
+        }
+        composeTestRule.onNodeWithText("Alice").performClick()
+
+        assertThat(navigatedIds).containsExactly("u1")
+    }
+}
+```
+
+See *Testing a Screen with a ViewModel (Hilt)* below for the full `@TestInstallIn` module and the fake repository setup these tests share. Resist the urge to add a third `@Test` here that re-proves "error state shows the retry button" — that branch already has a Content test covering it.
+
+#### Best Practices & Standards
+
+- **Default to Content tests.** Push all `UiState`-coverage assertions down to the Content layer. Reserve Screen tests for the wiring you cannot verify any other way.
+- **One Screen test per destination, minimum coverage.** Aim for a single Screen test class per screen, asserting the happy-path wiring plus the one-time events. Do not re-prove every `UiState` branch — that is what the Content test exists for.
+- **No `@TestInstallIn` in Content tests.** If a Content test needs Hilt, you are testing the wrong composable; convert it to a Screen test or break the dependency.
+- **No hand-built state passed through `XxxScreen`.** If you want a literal `UiState`, call `XxxContent` directly. Calling `XxxScreen` and trying to coerce state through fakes is a smell that the Screen/Content split was broken in production code.
+- **No ViewModel mocks.** The architecture doc forbids passing the ViewModel into `XxxContent`; tests follow the same rule. State and lambdas only — never `mockk<UserListViewModel>()`.
+- **Robotise Screen tests, not Content tests.** Per the Robot Pattern (§4), Robots earn their keep on multi-step flows — and that is where Screen tests live. Keep Content tests flat: setup → act → assert.
+- **Reuse `UiState` fixtures.** Define `sampleUsers()` / `UserListUiState.success(...)` in a shared test fixture (per §5) and reuse the same literal across Content tests, Screen tests' Hilt fakes, and `@Preview` blocks. One source of truth for "a populated user list".
+- **Tag the boundary at the Content root.** `Modifier.testTag("user_list_screen")` belongs on the root layout *inside* `XxxContent`, not on `XxxScreen`. Both Content and Screen tests can then locate the same node.
+- **Do not replay UI assertions in Screen tests.** If `UserListContentTest` already proves "loading shows a spinner", `UserListScreenTest` should not repeat that — it should prove "the spinner disappears once the fake repository emits".
+- **Use failure locality to triage.** When a Screen test fails, check the underlying Content test first. If the Content test still passes, the bug is in the wiring layer; if it has also broken, the bug is in rendering. Fix at the right level instead of patching the higher test.
+- **Match `@Preview` count and Content `@Test` count.** A `XxxContent` with 4 previews should have at least 4 Content tests — one per state — and the test fixture and preview fixture should share the same builder.
 
 ---
 

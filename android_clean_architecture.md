@@ -6,20 +6,21 @@
 
 1. [MVVM Architecture](#1-mvvm-architecture)
 2. [Recommended Codebase Structure](#2-recommended-codebase-structure)
-3. [SOLID Principles](#3-solid-principles)
-4. [Clean Code](#4-clean-code)
-5. [Threading, Coroutines & Dispatchers](#5-threading-coroutines--dispatchers)
-6. [Data Sources](#6-data-sources)
-7. [Repositories](#7-repositories)
-8. [Use Cases](#8-use-cases)
-9. [ViewModel](#9-viewmodel)
-10. [Jetpack Compose](#10-jetpack-compose)
-11. [Network Operations with OkHttp](#11-network-operations-with-okhttp)
-12. [Dependency Injection with Hilt](#12-dependency-injection-with-hilt)
-13. [Data Storage](#13-data-storage)
+3. [Gradle Dependencies & Version Catalog](#3-gradle-dependencies--version-catalog)
+4. [SOLID Principles](#4-solid-principles)
+5. [Clean Code](#5-clean-code)
+6. [Threading, Coroutines & Dispatchers](#6-threading-coroutines--dispatchers)
+7. [Data Sources](#7-data-sources)
+8. [Repositories](#8-repositories)
+9. [Use Cases](#9-use-cases)
+10. [ViewModel](#10-viewmodel)
+11. [Jetpack Compose](#11-jetpack-compose)
+12. [Network Operations with OkHttp](#12-network-operations-with-okhttp)
+13. [Dependency Injection with Hilt](#13-dependency-injection-with-hilt)
+14. [Data Storage](#14-data-storage)
     - [Room](#room)
     - [SharedPreferences & SecureSharedPreferences](#sharedpreferences--securesharedpreferences)
-14. [Image Loading with COIL](#14-image-loading-with-coil)
+15. [Image Loading with COIL](#15-image-loading-with-coil)
 
 ---
 
@@ -339,7 +340,148 @@ Each `:feature` module depends only on `:core:domain` (not on `:core:data`), enf
 
 ---
 
-## 3. SOLID Principles
+## 3. Gradle Dependencies & Version Catalog
+
+### What is a Gradle Version Catalog?
+
+A Gradle version catalog is a single, repo-wide TOML file (`gradle/libs.versions.toml`) that declares every external dependency and plugin version your build uses. Module `build.gradle.kts` files reference catalog accessors (`libs.okhttp`, `libs.retrofit`, `libs.plugins.hilt`) instead of literal `"group:artifact:version"` strings.
+
+### Why Use a Catalog?
+
+- **Single source of truth.** Bumping a library across the repo is a one-line change in the catalog, not a search-and-replace across modules.
+- **Compile-time validation.** A typo in a library accessor fails the build fast; a typo in a literal version string yields a cryptic resolution error.
+- **IDE autocompletion.** Android Studio autocompletes `libs.<accessor>` from the catalog.
+- **Multi-module consistency.** No module can quietly diverge from the canonical version.
+
+### When to Use It?
+
+Always — from day one. Every dependency referenced anywhere in this guide is declared in the catalog; no inline `"group:artifact:version"` strings appear in any module `build.gradle.kts`.
+
+### File Structure
+
+The catalog lives at `gradle/libs.versions.toml` (no other path is read by Gradle). Three top-level tables — `[versions]`, `[libraries]`, `[plugins]`:
+
+```toml
+[versions]
+agp                     = "8.4.0"
+kotlin                  = "2.0.0"
+coroutines              = "1.8.1"
+serialization-json      = "1.6.3"
+okhttp                  = "4.12.0"
+retrofit                = "2.11.0"
+retrofit-serialization  = "1.0.0"
+hilt                    = "2.51.1"
+androidx-hilt           = "1.2.0"
+room                    = "2.6.1"
+compose-test            = "1.6.8"
+androidx-test           = "1.6.1"
+androidx-test-junit     = "1.2.1"
+junit                   = "4.13.2"
+mockk                   = "1.13.10"
+truth                   = "1.4.2"
+turbine                 = "1.1.0"
+security-crypto         = "1.1.0-alpha06"
+datastore               = "1.1.1"
+coil                    = "3.0.0"
+
+[libraries]
+kotlinx-coroutines-core         = { group = "org.jetbrains.kotlinx",    name = "kotlinx-coroutines-core",         version.ref = "coroutines" }
+kotlinx-coroutines-android      = { group = "org.jetbrains.kotlinx",    name = "kotlinx-coroutines-android",      version.ref = "coroutines" }
+kotlinx-coroutines-test         = { group = "org.jetbrains.kotlinx",    name = "kotlinx-coroutines-test",         version.ref = "coroutines" }
+kotlinx-serialization-json      = { group = "org.jetbrains.kotlinx",    name = "kotlinx-serialization-json",      version.ref = "serialization-json" }
+okhttp                          = { group = "com.squareup.okhttp3",     name = "okhttp",                          version.ref = "okhttp" }
+okhttp-logging-interceptor      = { group = "com.squareup.okhttp3",     name = "logging-interceptor",             version.ref = "okhttp" }
+okhttp-mockwebserver            = { group = "com.squareup.okhttp3",     name = "mockwebserver",                   version.ref = "okhttp" }
+retrofit                        = { group = "com.squareup.retrofit2",   name = "retrofit",                        version.ref = "retrofit" }
+retrofit-kotlinx-serialization  = { group = "com.jakewharton.retrofit", name = "retrofit2-kotlinx-serialization-converter", version.ref = "retrofit-serialization" }
+hilt-android                    = { group = "com.google.dagger",        name = "hilt-android",                    version.ref = "hilt" }
+hilt-android-compiler           = { group = "com.google.dagger",        name = "hilt-android-compiler",           version.ref = "hilt" }
+hilt-android-testing            = { group = "com.google.dagger",        name = "hilt-android-testing",            version.ref = "hilt" }
+androidx-hilt-navigation-compose = { group = "androidx.hilt",           name = "hilt-navigation-compose",         version.ref = "androidx-hilt" }
+androidx-hilt-work              = { group = "androidx.hilt",            name = "hilt-work",                       version.ref = "androidx-hilt" }
+androidx-hilt-compiler          = { group = "androidx.hilt",            name = "hilt-compiler",                   version.ref = "androidx-hilt" }
+androidx-room-runtime           = { group = "androidx.room",            name = "room-runtime",                    version.ref = "room" }
+androidx-room-ktx               = { group = "androidx.room",            name = "room-ktx",                        version.ref = "room" }
+androidx-room-compiler          = { group = "androidx.room",            name = "room-compiler",                   version.ref = "room" }
+androidx-room-testing           = { group = "androidx.room",            name = "room-testing",                    version.ref = "room" }
+compose-ui-test-junit4          = { group = "androidx.compose.ui",      name = "ui-test-junit4",                  version.ref = "compose-test" }
+compose-ui-test-manifest        = { group = "androidx.compose.ui",      name = "ui-test-manifest",                version.ref = "compose-test" }
+androidx-test-runner            = { group = "androidx.test",            name = "runner",                          version.ref = "androidx-test" }
+androidx-test-rules             = { group = "androidx.test",            name = "rules",                           version.ref = "androidx-test" }
+androidx-test-ext-junit         = { group = "androidx.test.ext",        name = "junit",                           version.ref = "androidx-test-junit" }
+junit                           = { group = "junit",                    name = "junit",                           version.ref = "junit" }
+mockk                           = { group = "io.mockk",                 name = "mockk",                           version.ref = "mockk" }
+mockk-android                   = { group = "io.mockk",                 name = "mockk-android",                   version.ref = "mockk" }
+truth                           = { group = "com.google.truth",         name = "truth",                           version.ref = "truth" }
+turbine                         = { group = "app.cash.turbine",         name = "turbine",                         version.ref = "turbine" }
+androidx-security-crypto        = { group = "androidx.security",        name = "security-crypto",                 version.ref = "security-crypto" }
+androidx-datastore-preferences  = { group = "androidx.datastore",       name = "datastore-preferences",           version.ref = "datastore" }
+coil-compose                    = { group = "io.coil-kt.coil3",         name = "coil-compose",                    version.ref = "coil" }
+coil-network-okhttp             = { group = "io.coil-kt.coil3",         name = "coil-network-okhttp",             version.ref = "coil" }
+
+[plugins]
+android-application  = { id = "com.android.application",                       version.ref = "agp" }
+android-library      = { id = "com.android.library",                           version.ref = "agp" }
+kotlin-android       = { id = "org.jetbrains.kotlin.android",                  version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization",     version.ref = "kotlin" }
+hilt                 = { id = "com.google.dagger.hilt.android",                version.ref = "hilt" }
+```
+
+### Consuming from `build.gradle.kts`
+
+```kotlin
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.hilt)
+}
+
+dependencies {
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging.interceptor)
+    implementation(libs.retrofit)
+    implementation(libs.retrofit.kotlinx.serialization)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.hilt.android)
+    kapt(libs.hilt.android.compiler)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.mockk)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.truth)
+    testImplementation(libs.turbine)
+
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
+}
+```
+
+Accessor-naming rule: dashes in catalog keys become dots in the Kotlin accessor — `okhttp-logging-interceptor` → `libs.okhttp.logging.interceptor`. Plugins reach via `libs.plugins.<id>`.
+
+### The Latest-Stable Rule
+
+When adding or bumping a dependency, always pick the **latest stable** release — skip `-alpha*`, `-beta*`, `-rc*`, `-dev*`, and `-SNAPSHOT`. Look up the current version on Maven Central (`https://search.maven.org/`) or via:
+
+```bash
+curl -s "https://search.maven.org/solrsearch/select?q=g:<group>+AND+a:<artifact>&rows=20&wt=json" \
+  | jq -r '.response.docs[].latestVersion' | grep -Ev 'alpha|beta|rc|dev|SNAPSHOT' | head -1
+```
+
+Stale catalogs accumulate CVEs and miss bug fixes — schedule a quarterly bump pass even when nothing is broken.
+
+### Anti-Patterns
+
+- **Inline `implementation("group:artifact:version")`** — never in any module. Catalog only.
+- **Mixing catalog and inline** — pick one approach project-wide; mixing defeats the single source of truth.
+- **`version = "1.2.+"` dynamic versions** — non-deterministic builds. Always pin to an exact version.
+- **`SNAPSHOT` versions on `main`** — only for transient local testing.
+- **Catalog outside `gradle/libs.versions.toml`** — Gradle reads no other path.
+
+---
+
+## 4. SOLID Principles
 
 ### What are SOLID Principles?
 
@@ -521,7 +663,7 @@ class UserRepositoryImpl @Inject constructor(
 
 ---
 
-## 4. Clean Code
+## 5. Clean Code
 
 ### What is Clean Code?
 
@@ -724,7 +866,7 @@ suspend fun loadDashboard(): Dashboard = supervisorScope {
 
 ---
 
-## 5. Threading, Coroutines & Dispatchers
+## 6. Threading, Coroutines & Dispatchers
 
 ### What is Threading?
 
@@ -752,9 +894,9 @@ You can run **millions** of coroutines simultaneously where only thousands of th
 
 ```kotlin
 dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 ```
 
@@ -1339,7 +1481,7 @@ suspend fun <T> retry(times: Int, delayMs: Long, block: suspend () -> T): T {
 
 ---
 
-## 6. Data Sources
+## 7. Data Sources
 
 ### What are Data Sources?
 
@@ -1470,7 +1612,7 @@ fun User.toEntity()       = UserEntity(id, name, email, avatarUrl)
 
 ---
 
-## 7. Repositories
+## 8. Repositories
 
 ### What is a Repository?
 
@@ -1577,7 +1719,7 @@ fun getUserCacheFirst(id: String): Flow<Result<User>> = flow {
 
 ---
 
-## 8. Use Cases
+## 9. Use Cases
 
 ### What is a Use Case?
 
@@ -1690,7 +1832,7 @@ class RegisterUserUseCaseTest {
 
 ---
 
-## 9. ViewModel
+## 10. ViewModel
 
 ### What is a ViewModel?
 
@@ -1819,7 +1961,7 @@ val uiState: StateFlow<DashboardUiState> = combine(
 
 ---
 
-## 10. Jetpack Compose
+## 11. Jetpack Compose
 
 ### What is Jetpack Compose?
 
@@ -1914,6 +2056,255 @@ fun SearchContent(
     }
 }
 ```
+
+### Screen / Content Pattern
+
+State hoisting at the *screen* level becomes a naming convention worth standardising on across the whole app. The **Screen / Content pattern** turns the `SearchScreen` / `SearchContent` split shown above into a rule: every screen-level destination is composed of two (optionally three) clearly named composables, each with a single job.
+
+#### What is the Screen / Content Pattern?
+
+A structural convention where every screen in a Compose app is split into two composables that have very different jobs:
+
+| Layer | Stateful? | Knows about ViewModel / Hilt / Navigation? | Purpose |
+|-------|-----------|--------------------------------------------|---------|
+| `XxxScreen`  | Yes       | Yes | Wires the ViewModel, collects state with lifecycle awareness, dispatches one-time events (snackbars, navigation), forwards UI state + callbacks down to `XxxContent`. |
+| `XxxContent` | No (pure) | No  | Receives a `UiState` and event lambdas. Renders the UI. Knows nothing about *how* the data is produced. |
+
+Optionally, a thin third `XxxRoute` layer sits between the NavHost entry and `XxxScreen` to parse navigation arguments. It is a refinement, not a requirement — adopt it once a screen has more than one or two `navArgument`s.
+
+Conceptually, this is the Compose embodiment of the Unidirectional Data Flow already described in §1 *MVVM Architecture* — state flows **down** through `XxxContent`'s parameters, events flow **up** through its lambdas.
+
+#### Why Use It?
+
+Not just abstract "separation of concerns" — the split pays for itself in concrete ways:
+
+- **Testable in isolation.** `XxxContent` is a pure function of its inputs. The same `createComposeRule()` shown later in *Compose Testing* can drive every UI state — loading, error, empty, success — without Hilt, fakes, or coroutines. The ViewModel keeps its own unit tests in §10.
+- **Preview-friendly.** A `@Preview` for `XxxContent` only needs a hand-built `UiState` fixture. No Hilt graph, no fake ViewModel, no runtime injection — previews stay instantaneous and never break when DI wiring changes.
+- **Reusable.** Because `XxxContent` has no hidden dependencies, the same composable can render inside a bottom sheet, a tablet master/detail pane, or a wear-screen variant by swapping who supplies the state.
+- **Stable contract.** When data sources, repositories, mappers, or even the architectural style change, the `XxxContent` surface — a `UiState` plus lambdas — stays the same. Refactors stay below the Screen line.
+- **Easier multiplatform migration.** Compose Multiplatform / KMP projects can lift `XxxContent` into shared code while leaving the Android-specific `XxxScreen` (Hilt, Navigation, lifecycle APIs) behind on the platform side.
+- **Cleaner recomposition.** `XxxContent` reads from value-class parameters, so an `@Immutable` / `@Stable` `UiState` lets Compose's skipping optimisation kick in and avoid recomposing on identity-equal inputs.
+- **Enforces UDF.** Putting the rule in the names (`Screen` reads/dispatches, `Content` renders) makes it obvious in review when somebody breaks the flow by mutating state inside the UI.
+
+#### When to Use It?
+
+Always, for any screen-level composable backed by a ViewModel. Apply the split whenever a composable has *any* of:
+
+- a ViewModel
+- a coroutine-scoped state stream
+- navigation actions
+- side effects bound to a screen lifecycle (snackbars, system bars, focus)
+
+For small self-contained components — a `UserCard`, a chip row, a price badge — the split is unnecessary. They are already stateless leaf composables and adding a `XxxContent` twin just doubles the surface for no benefit.
+
+#### How to Use It — Full Example
+
+Continuing the `User` thread already used in this section, here is the full lifecycle of a single screen.
+
+**1. Model the UI state.** Put every piece of data the screen needs into one immutable type so Compose can skip recomposition when nothing meaningful changes:
+
+```kotlin
+@Immutable
+data class UserListUiState(
+    val isLoading: Boolean       = false,
+    val users: List<User>        = emptyList(),
+    val errorMessage: String?    = null,
+    val query: String            = ""
+)
+```
+
+A single state object works well when fields can co-exist (e.g., "loaded list and a non-fatal error banner at the same time"). For strictly mutually exclusive screens, a `sealed interface UserListUiState { object Loading; data class Success(...); data class Error(...) }` is an equally valid alternative — pick whichever forces less `when`-branch noise in `XxxContent`.
+
+**2. Model one-time events.** Navigation, snackbars, dialogs and "exit screen" actions must fire *exactly once* — they must not replay on configuration change. Keep them out of `UiState`:
+
+```kotlin
+sealed interface UserListEvent {
+    data class NavigateToDetail(val userId: String) : UserListEvent
+    data class ShowSnackbar(val message: String)    : UserListEvent
+}
+```
+
+**3. Expose state and events from the ViewModel.** Use `StateFlow` for state (always has a value, replays on collect) and a `Channel` / `SharedFlow(replay = 0)` for events (no replay). For deeper ViewModel guidance see §10 *ViewModel*.
+
+```kotlin
+@HiltViewModel
+class UserListViewModel @Inject constructor(
+    private val getUsers: GetUsersUseCase
+) : ViewModel() {
+
+    private val _state  = MutableStateFlow(UserListUiState(isLoading = true))
+    val state: StateFlow<UserListUiState> = _state.asStateFlow()
+
+    private val _events = Channel<UserListEvent>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
+
+    init { load() }
+
+    fun onQueryChanged(q: String) { _state.update { it.copy(query = q) } }
+    fun onUserClick(id: String)   { viewModelScope.launch { _events.send(UserListEvent.NavigateToDetail(id)) } }
+    fun onRetry()                 { load() }
+
+    private fun load() = viewModelScope.launch {
+        _state.update { it.copy(isLoading = true, errorMessage = null) }
+        runCatching { getUsers() }
+            .onSuccess { users -> _state.update { it.copy(isLoading = false, users = users) } }
+            .onFailure { e     -> _state.update { it.copy(isLoading = false, errorMessage = e.message) } }
+    }
+}
+```
+
+**4. Stateful Screen.** Wires the ViewModel, collects state lifecycle-aware, drains events, and forwards everything to `XxxContent`. Navigation lambdas come in as parameters — the Screen never sees the `NavController` directly.
+
+```kotlin
+@Composable
+fun UserListScreen(
+    onNavigateToDetail: (String) -> Unit,
+    viewModel: UserListViewModel = hiltViewModel()
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is UserListEvent.NavigateToDetail -> onNavigateToDetail(event.userId)
+                is UserListEvent.ShowSnackbar     -> snackbarHostState.showSnackbar(event.message)
+            }
+        }
+    }
+
+    UserListContent(
+        state          = state,
+        snackbarHost   = snackbarHostState,
+        onQueryChanged = viewModel::onQueryChanged,
+        onUserClick    = viewModel::onUserClick,
+        onRetry        = viewModel::onRetry
+    )
+}
+```
+
+**5. Stateless Content.** Pure function of its inputs. *No* `hiltViewModel()`, *no* `viewModelScope`, *no* `NavController` — just `state` in, lambdas out. This composable is what previews render and what UI tests drive.
+
+```kotlin
+@Composable
+fun UserListContent(
+    state: UserListUiState,
+    snackbarHost: SnackbarHostState,
+    onQueryChanged: (String) -> Unit,
+    onUserClick: (String) -> Unit,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Scaffold(
+        modifier     = modifier,
+        snackbarHost = { SnackbarHost(snackbarHost) }
+    ) { padding ->
+        Column(Modifier.padding(padding)) {
+            OutlinedTextField(
+                value         = state.query,
+                onValueChange = onQueryChanged,
+                placeholder   = { Text("Search users") },
+                modifier      = Modifier.fillMaxWidth().padding(16.dp)
+            )
+            when {
+                state.isLoading            -> LoadingIndicator()
+                state.errorMessage != null -> ErrorState(state.errorMessage, onRetry)
+                state.users.isEmpty()      -> EmptyState()
+                else -> LazyColumn {
+                    items(state.users, key = { it.id }) { user ->
+                        UserCard(user = user, onUserClick = onUserClick)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**6. Previews — one per meaningful state.** Building a `UiState` literal is all it takes; no Hilt, no fakes:
+
+```kotlin
+@Preview @Composable
+private fun UserListContentSuccessPreview() = AppTheme {
+    UserListContent(
+        state          = UserListUiState(users = sampleUsers()),
+        snackbarHost   = remember { SnackbarHostState() },
+        onQueryChanged = {}, onUserClick = {}, onRetry = {}
+    )
+}
+
+@Preview @Composable
+private fun UserListContentLoadingPreview() = AppTheme {
+    UserListContent(
+        state          = UserListUiState(isLoading = true),
+        snackbarHost   = remember { SnackbarHostState() },
+        onQueryChanged = {}, onUserClick = {}, onRetry = {}
+    )
+}
+
+@Preview @Composable
+private fun UserListContentErrorPreview() = AppTheme {
+    UserListContent(
+        state          = UserListUiState(errorMessage = "Network unavailable"),
+        snackbarHost   = remember { SnackbarHostState() },
+        onQueryChanged = {}, onUserClick = {}, onRetry = {}
+    )
+}
+```
+
+**7. Tests target `XxxContent`.** Using the same `createComposeRule()` setup shown later in *Compose Testing*, every UI branch can be exercised by passing in the right `UiState` — no Hilt rule, no fake ViewModel, no coroutine plumbing:
+
+```kotlin
+@Test fun `shows empty state when no users`() {
+    composeRule.setContent {
+        AppTheme {
+            UserListContent(
+                state          = UserListUiState(users = emptyList()),
+                snackbarHost   = remember { SnackbarHostState() },
+                onQueryChanged = {}, onUserClick = {}, onRetry = {}
+            )
+        }
+    }
+    composeRule.onNodeWithText("No users yet").assertIsDisplayed()
+}
+
+@Test fun `clicking retry invokes onRetry`() {
+    var retried = false
+    composeRule.setContent {
+        AppTheme {
+            UserListContent(
+                state          = UserListUiState(errorMessage = "boom"),
+                snackbarHost   = remember { SnackbarHostState() },
+                onQueryChanged = {}, onUserClick = {}, onRetry = { retried = true }
+            )
+        }
+    }
+    composeRule.onNodeWithText("Retry").performClick()
+    assertThat(retried).isTrue()
+}
+```
+
+**8. Optional `XxxRoute` layer.** Once a screen accepts multiple navigation arguments, isolate the parsing in a Route composable so the Screen stays focused on UI wiring:
+
+```kotlin
+@Composable
+fun UserDetailRoute(
+    backStackEntry: NavBackStackEntry,
+    onNavigateBack: () -> Unit
+) {
+    val userId = backStackEntry.arguments?.getString("userId").orEmpty()
+    UserDetailScreen(userId = userId, onNavigateBack = onNavigateBack)
+}
+```
+
+#### Anti-Patterns to Avoid
+
+- **Don't pass the ViewModel itself into `XxxContent`.** That re-couples the layers, breaks previews, and defeats the purpose of the split.
+- **Don't read `LocalLifecycleOwner`, `LocalContext` for DI, or call `hiltViewModel()` inside `XxxContent`.** Those calls belong in `XxxScreen` only.
+- **Don't emit one-time events through `StateFlow`.** `StateFlow` always replays its latest value to new collectors, which will re-fire navigation or snackbars after a configuration change. Use a `Channel` or `SharedFlow(replay = 0)` instead.
+- **Don't put `MutableState` fields *inside* `UiState`.** The whole state object must be immutable; transitions go through the ViewModel so they survive recomposition and configuration change.
+- **Don't make `XxxContent` `suspend` or launch coroutines inside it.** All asynchronous work belongs in the ViewModel; `XxxContent` is synchronous rendering only.
+- **Don't grow `XxxScreen` past wiring.** If you find yourself writing `when` branches or layout code in the Screen, push it down into `XxxContent`.
 
 ### Side Effects
 
@@ -2037,7 +2428,7 @@ val showScrollToTop by remember { derivedStateOf { listState.firstVisibleItemInd
 
 ---
 
-## 11. Network Operations with OkHttp
+## 12. Network Operations with OkHttp
 
 ### What is OkHttp?
 
@@ -2055,11 +2446,11 @@ Always, even when using Retrofit. Configure authentication headers, timeouts, lo
 
 ```kotlin
 dependencies {
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
-    implementation("com.squareup.retrofit2:retrofit:2.11.0")
-    implementation("com.jakewharton.retrofit:retrofit2-kotlinx-serialization-converter:1.0.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging.interceptor)
+    implementation(libs.retrofit)
+    implementation(libs.retrofit.kotlinx.serialization)
+    implementation(libs.kotlinx.serialization.json)
 }
 ```
 
@@ -2233,7 +2624,7 @@ class UserPagingSource @Inject constructor(
 
 ---
 
-## 12. Dependency Injection with Hilt
+## 13. Dependency Injection with Hilt
 
 ### What is Hilt?
 
@@ -2268,12 +2659,12 @@ plugins {
 }
 
 dependencies {
-    implementation("com.google.dagger:hilt-android:2.51.1")
-    kapt("com.google.dagger:hilt-android-compiler:2.51.1")
-    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    implementation(libs.hilt.android)
+    kapt(libs.hilt.android.compiler)
+    implementation(libs.androidx.hilt.navigation.compose)
     // For WorkManager integration
-    implementation("androidx.hilt:hilt-work:1.2.0")
-    kapt("androidx.hilt:hilt-compiler:1.2.0")
+    implementation(libs.androidx.hilt.work)
+    kapt(libs.androidx.hilt.compiler)
 }
 
 kapt { correctErrorTypes = true }
@@ -2502,7 +2893,7 @@ object FakeNetworkModule {
 
 ---
 
-## 13. Data Storage
+## 14. Data Storage
 
 ### Room
 
@@ -2525,10 +2916,10 @@ Whenever you need to store structured, relational data locally. Prefer Room over
 
 ```kotlin
 dependencies {
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")          // Coroutines + Flow support
-    kapt("androidx.room:room-compiler:2.6.1")
-    testImplementation("androidx.room:room-testing:2.6.1")
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)          // Coroutines + Flow support
+    kapt(libs.androidx.room.compiler)
+    testImplementation(libs.androidx.room.testing)
 }
 ```
 
@@ -2772,8 +3163,8 @@ For **new projects**, prefer `DataStore<Preferences>` over `SharedPreferences` �
 
 ```kotlin
 dependencies {
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.datastore.preferences)
 }
 ```
 
@@ -2938,7 +3329,7 @@ class SettingsRepository @Inject constructor(
 
 ---
 
-## 14. Image Loading with COIL
+## 15. Image Loading with COIL
 
 ### What is COIL?
 
@@ -2960,10 +3351,10 @@ Any time you need to load remote or local images. Use `AsyncImage` in Compose sc
 
 ```kotlin
 dependencies {
-    implementation("io.coil-kt:coil-compose:2.6.0")
-    implementation("io.coil-kt:coil-gif:2.6.0")    // Animated GIF support
-    implementation("io.coil-kt:coil-svg:2.6.0")    // SVG support
-    implementation("io.coil-kt:coil-video:2.6.0")  // Video thumbnail support
+    implementation(libs.coil2.compose)
+    implementation(libs.coil2.gif)    // Animated GIF support
+    implementation(libs.coil2.svg)    // SVG support
+    implementation(libs.coil2.video)  // Video thumbnail support
 }
 ```
 
