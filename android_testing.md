@@ -6,10 +6,13 @@
 
 1. [The Testing Pyramid](#1-the-testing-pyramid)
 2. [Test-Driven Development (TDD)](#2-test-driven-development-tdd)
-3. [Unit Tests](#3-unit-tests)
-4. [Integration Tests](#4-integration-tests)
-5. [UI Tests with Jetpack Compose](#5-ui-tests-with-jetpack-compose)
-6. [Screenshot Tests](#6-screenshot-tests)
+3. [Stubbing and Mocking](#3-stubbing-and-mocking)
+4. [Robot Pattern](#4-robot-pattern)
+5. [Test Fixtures](#5-test-fixtures)
+6. [Unit Tests](#6-unit-tests)
+7. [Integration Tests](#7-integration-tests)
+8. [UI Tests with Jetpack Compose](#8-ui-tests-with-jetpack-compose)
+9. [Screenshot Tests](#9-screenshot-tests)
 
 ---
 
@@ -213,7 +216,904 @@ Expected: **PASS** — all tests still green after refactor.
 
 ---
 
-## 3. Unit Tests
+## 3. Stubbing and Mocking
+
+### What are Stubbing and Mocking?
+
+Stubbing and mocking are two related testing techniques used to control dependencies so the test can focus on the behaviour of the unit under test.
+
+- **Stubbing** means defining what a dependency should return or throw during a test.
+- **Mocking** means replacing a dependency with a test double that can also verify how it was used.
+
+In practice, a single library such as MockK can do both. You can *stub* `sessionManager.getToken()` to return a value, then *verify* that `sessionManager.clearSession()` was called exactly once.
+
+### Why Use Them?
+
+Real dependencies are often slow, nondeterministic, or hard to control. A repository that hits the network, a clock that returns the current time, or an analytics tracker that writes events externally all make tests harder to reason about.
+
+Stubs and mocks give the test complete control over those dependencies. That control produces tests that are faster, more repeatable, and more precise when failures occur.
+
+### Stubbing vs Mocking vs Faking
+
+These terms are often mixed together, but they solve slightly different problems:
+
+| Technique | Main purpose | Best use case |
+|----------|--------------|---------------|
+| Stub | Control returned data or thrown errors | “When this dependency is called, return X” |
+| Mock | Verify interactions with a dependency | “Make sure this method was called once with these arguments” |
+| Fake | Provide a lightweight working implementation | Reusable in-memory repository, DAO, cache, or service |
+
+A simple rule of thumb:
+- Use a **fake** when you want realistic behaviour and reuse across many tests.
+- Use a **stub** when you only need a dependency to return one controlled answer.
+- Use a **mock** when the important assertion is about the interaction itself.
+
+### When to Stub
+
+Use stubbing when the return value of a dependency is part of the test setup, not the test assertion. Common examples include:
+
+- Returning a user from a repository.
+- Throwing an `IOException` from an API client.
+- Returning `true` from a feature flag service.
+- Returning a specific timestamp from a clock abstraction.
+
+In these cases, the dependency is only there to support the test scenario. The test usually asserts on the resulting state, output, or UI.
+
+### When to Mock
+
+Use mocking when the interaction with the dependency is itself the behaviour you care about. Common examples include:
+
+- Verifying an analytics event was sent.
+- Verifying a repository called `save()` exactly once.
+- Verifying a retry policy triggered three attempts.
+- Verifying an interceptor cleared the session after a 401 response.
+
+If the test would still be meaningful without checking the call, you may not need a mock.
+
+---
+
+### Stubbing with MockK
+
+MockK uses `every { ... } returns ...` for regular functions and `coEvery { ... } returns ...` for suspending functions.
+
+```kotlin
+class GetUserUseCaseTest {
+
+    private val userRepository = mockk<UserRepository>()
+    private val useCase = GetUserUseCase(userRepository)
+
+    @Test
+    fun `returns user from repository`() = runTest {
+        val user = User("u1", "Alice", "alice@example.com", null)
+        coEvery { userRepository.getUser("u1") } returns Result.success(user)
+
+        val result = useCase(GetUserUseCase.Params("u1"))
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(result.getOrThrow()).isEqualTo(user)
+    }
+
+    @Test
+    fun `returns failure when repository throws`() = runTest {
+        coEvery { userRepository.getUser("u1") } returns Result.failure(IOException("timeout"))
+
+        val result = useCase(GetUserUseCase.Params("u1"))
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(IOException::class.java)
+    }
+}
+```
+
+### Throwing Errors from Stubs
+
+Stubs are especially useful when you need to force an error path that is difficult to reproduce reliably with a real dependency:
+
+```kotlin
+@Test
+fun `emits Error state when refresh fails`() = runTest {
+    coEvery { userRepository.refreshUsers() } throws IOException("No network")
+
+    viewModel.refresh()
+
+    assertThat(viewModel.uiState.value).isInstanceOf(UserListUiState.Error::class.java)
+}
+```
+
+This is one of the strongest uses of stubbing: driving code into rare branches such as timeouts, server errors, or invalid data responses.
+
+---
+
+### Mocking with Verification
+
+Mocking becomes useful when the test needs to prove that a dependency was used in a particular way.
+
+```kotlin
+class LoginAnalyticsTest {
+
+    private val analytics = mockk<AnalyticsTracker>(relaxed = true)
+    private val authRepository = mockk<AuthRepository>()
+    private val useCase = LoginUseCase(authRepository, analytics)
+
+    @Test
+    fun `tracks success event after login succeeds`() = runTest {
+        coEvery { authRepository.login("alice@example.com", "Password1") } returns
+            Result.success(AuthToken("access123", "refresh456"))
+
+        useCase(LoginUseCase.Params("alice@example.com", "Password1"))
+
+        verify(exactly = 1) {
+            analytics.track("login_success")
+        }
+    }
+
+    @Test
+    fun `tracks failure event after login fails`() = runTest {
+        coEvery { authRepository.login(any(), any()) } returns
+            Result.failure(IOException("network error"))
+
+        useCase(LoginUseCase.Params("alice@example.com", "Password1"))
+
+        verify(exactly = 1) {
+            analytics.track("login_failure")
+        }
+    }
+}
+```
+
+A **relaxed** mock automatically returns simple default values for functions you do not care about, which reduces setup noise for dependencies used only for verification.
+
+### Verifying Arguments and Call Count
+
+```kotlin
+@Test
+fun `saves updated user exactly once`() = runTest {
+    val repository = mockk<UserRepository>()
+    coEvery { repository.saveUser(any()) } returns Result.success(Unit)
+
+    val user = User("u1", "Bob", "bob@example.com", null)
+    val useCase = SaveUserUseCase(repository)
+
+    useCase(SaveUserUseCase.Params(user))
+
+    coVerify(exactly = 1) {
+        repository.saveUser(match { it.id == "u1" && it.name == "Bob" })
+    }
+}
+```
+
+This style is useful when the correctness of the outgoing command matters more than the returned result.
+
+---
+
+### Common MockK Patterns
+
+```kotlin
+// Regular function
+val clock = mockk<AppClock>()
+every { clock.now() } returns Instant.parse("2026-05-18T12:00:00Z")
+
+// Suspending function
+coEvery { userRepository.getUser("u1") } returns Result.success(user)
+
+// Function returns Unit
+val analytics = mockk<AnalyticsTracker>(relaxed = true)
+every { analytics.track(any()) } just Runs
+
+// Verify regular function
+verify(exactly = 1) { analytics.track("screen_opened") }
+
+// Verify suspending function
+coVerify(exactly = 1) { userRepository.refreshUsers() }
+
+// Verify nothing happened
+verify(exactly = 0) { analytics.track(any()) }
+coVerify(exactly = 0) { userRepository.deleteUser(any()) }
+```
+
+### Mocking Flows
+
+When a dependency exposes a `Flow`, stub the returned stream directly:
+
+```kotlin
+@Test
+fun `observeUsers emits repository values`() = runTest {
+    val users = listOf(User("u1", "Alice", "alice@example.com", null))
+    every { userRepository.observeUsers() } returns flowOf(users)
+
+    viewModel.users.test {
+        assertThat(awaitItem()).isEqualTo(users)
+        cancelAndConsumeRemainingEvents()
+    }
+}
+```
+
+The key point is that you are not mocking Flow internals. You are stubbing the dependency method to return a known Flow.
+
+---
+
+### Prefer State Assertions over Interaction Assertions
+
+A common mistake is over-verifying everything. That produces brittle tests tightly coupled to implementation details.
+
+```kotlin
+// Too coupled to internals
+coVerify { repository.getUser("u1") }
+coVerify { analytics.track("load_user") }
+coVerify { cache.put(any()) }
+
+// Better when outcome is what matters
+assertThat(viewModel.uiState.value).isInstanceOf(UserDetailUiState.Success::class.java)
+```
+
+Prefer interaction verification only when the interaction is the contract. For example, analytics, logging, retries, navigation callbacks, and side-effect boundaries are good candidates. Pure data transformation usually is not.
+
+### Avoid Mocking What You Own Too Early
+
+For stable app interfaces such as `UserRepository`, `SettingsRepository`, or `NetworkMonitor`, a fake is often easier to read and maintain than a heavily stubbed mock. Mocks shine when:
+
+- The dependency has many hard-to-model branches.
+- The test needs strict call verification.
+- The behaviour is incidental and not worth building a fake for.
+
+If a test needs five `coEvery` calls just to construct a basic scenario, that may be a sign a fake would be clearer.
+
+---
+
+### Example: Fake vs Stub vs Mock
+
+```kotlin
+// Fake: reusable implementation with state
+class FakeFeatureFlagRepository : FeatureFlagRepository {
+    private val flags = mutableMapOf<String, Boolean>()
+
+    fun setFlag(key: String, enabled: Boolean) {
+        flags[key] = enabled
+    }
+
+    override fun isEnabled(key: String): Boolean = flags[key] ?: false
+}
+
+// Stub: one-off controlled answer
+val featureFlags = mockk<FeatureFlagRepository>()
+every { featureFlags.isEnabled("new_home") } returns true
+
+// Mock: verify interaction
+val analytics = mockk<AnalyticsTracker>(relaxed = true)
+verify { analytics.track("new_home_opened") }
+```
+
+All three are valid. The right choice depends on whether the test needs reusable behaviour, controlled output, or interaction verification.
+
+### Common Mistakes
+
+- **Mocking everything by default.** This makes tests verbose and fragile.
+- **Verifying implementation details instead of outcomes.** Tests break during harmless refactors.
+- **Using mocks where a fake would be simpler.** The test becomes harder to read.
+- **Forgetting to clear mocks between tests.** State leakage causes confusing failures.
+- **Stubbing methods the code never calls.** Extra setup creates noise and hides what matters.
+
+### Best Practices
+
+| Practice | Why it helps |
+|---------|---------------|
+| Stub only what the scenario needs | Less setup makes the test intent clearer |
+| Verify only meaningful interactions | Reduces brittleness during refactoring |
+| Prefer fakes for stable domain interfaces | Tests read more like real code |
+| Use `coEvery` / `coVerify` for suspend functions | Matches coroutine-based APIs correctly |
+| Reset or recreate mocks per test | Prevents cross-test contamination |
+| Use relaxed mocks for fire-and-forget collaborators | Cuts boilerplate for analytics, loggers, and trackers |
+
+---
+
+---
+
+---
+
+## 4. Robot Pattern
+
+### What is the Robot Pattern?
+
+The Robot Pattern is a UI test design pattern popularised by Jake Wharton (Square) that creates a **typed DSL** over raw Compose Test (or Espresso) calls. Each screen or component gets a corresponding *robot* class that exposes human-readable actions and assertions. The test body calls the robot; the robot calls the test framework. Tests never touch `composeTestRule` directly.
+
+The pattern splits two responsibilities that are normally tangled together:
+
+- **What the test does** — expressed in domain terms (`loginRobot.enterEmail("alice@example.com").clickSignIn()`).
+- **How the framework finds elements** — hidden inside the robot (`onNodeWithTag("email_field").performTextInput(email)`).
+
+### Why Use the Robot Pattern?
+
+Without the pattern, every test method duplicates raw selectors. A single tag rename (`"email_field"` → `"login_email_input"`) breaks dozens of tests scattered across the file. With the pattern, the same rename requires one change in the robot, and all tests continue to pass.
+
+The pattern also makes tests readable to non-engineers. A product manager can read `loginRobot.assertErrorDisplayed("Invalid password")` and immediately understand what is being verified — without needing to know anything about Compose semantics nodes.
+
+Additionally, the fluent `apply`-based DSL encourages writing tests as **step-by-step scenarios** that mirror real user behaviour, making the intent of each test immediately obvious from its name and body alone.
+
+### When to Use the Robot Pattern?
+
+Use the Robot Pattern whenever:
+- More than one test method performs the same sequence of UI interactions.
+- A screen has complex forms, multi-step flows, or conditional states.
+- The test suite is large enough that maintenance cost of raw selectors becomes significant.
+
+For a single-screen throwaway test, a plain `composeTestRule` call is fine. Once the second test starts duplicating the same `onNodeWithTag(...)` calls, extract a robot.
+
+### How to Design a Good Robot
+
+A useful robot hides framework details but does **not** hide the scenario. Keep these rules in mind:
+
+- **One robot per screen or component.** A `LoginRobot` should know the login screen only; navigation can return the next robot.
+- **Expose domain language.** Prefer `enterEmail`, `submitLogin`, `assertLoginFailed` over `tapButton1` or `typeTextInField`.
+- **Use stable selectors internally.** Prefer `testTag` over visible text when possible because tags change less often than UI copy.
+- **Keep actions and assertions explicit.** Tests should still read like behaviour specifications, not like a magical black box.
+- **Return `this` for fluent steps.** Chaining keeps the scenario compact and readable.
+
+A robot is not a page object clone with dozens of generic helpers. It should model behaviour that matters to the screen under test.
+
+### How to Introduce Robots Incrementally
+
+You do not need to refactor the whole suite at once. A practical migration path is:
+
+1. Start with one flaky or duplicated screen test.
+2. Move repeated selectors and actions into a robot.
+3. Leave one or two raw assertions in the test if they are unique.
+4. Extract more methods only when a second test needs them.
+
+This keeps the abstraction lean. If a method is used once and does not improve readability, it probably does not belong in the robot yet.
+
+---
+
+### Defining a Robot
+
+A robot is a plain Kotlin class that wraps a `ComposeContentTestRule`. Every method returns `this` via `apply` so calls chain fluently. Group action methods and assertion methods clearly — or split into an *action robot* and an *assertion robot* if the class grows large.
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/robot/LoginRobot.kt
+class LoginRobot(private val rule: ComposeContentTestRule) {
+
+    // --- Actions ---
+
+    fun enterEmail(email: String) = apply {
+        rule.onNodeWithTag("login_email_field").performTextInput(email)
+    }
+
+    fun clearEmail() = apply {
+        rule.onNodeWithTag("login_email_field").performTextClearance()
+    }
+
+    fun enterPassword(password: String) = apply {
+        rule.onNodeWithTag("login_password_field").performTextInput(password)
+    }
+
+    fun clickSignIn() = apply {
+        rule.onNodeWithText("Sign In").performClick()
+    }
+
+    fun clickForgotPassword() = apply {
+        rule.onNodeWithText("Forgot password?").performClick()
+    }
+
+    // --- Assertions ---
+
+    fun assertSignInButtonEnabled() = apply {
+        rule.onNodeWithText("Sign In").assertIsEnabled()
+    }
+
+    fun assertSignInButtonDisabled() = apply {
+        rule.onNodeWithText("Sign In").assertIsNotEnabled()
+    }
+
+    fun assertErrorDisplayed(message: String) = apply {
+        rule.onNodeWithText(message).assertIsDisplayed()
+    }
+
+    fun assertErrorDoesNotExist() = apply {
+        rule.onNodeWithTag("login_error_message").assertDoesNotExist()
+    }
+
+    fun assertLoadingIndicatorVisible() = apply {
+        rule.onNodeWithTag("login_loading").assertIsDisplayed()
+    }
+}
+```
+
+### Using a Robot in Tests
+
+```kotlin
+@HiltAndroidTest
+@RunWith(AndroidJUnit4::class)
+class LoginScreenTest {
+
+    @get:Rule(order = 0) val hiltRule = HiltAndroidRule(this)
+    @get:Rule(order = 1) val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    @Inject lateinit var fakeAuthRepository: FakeAuthRepository
+
+    private val robot by lazy { LoginRobot(composeTestRule) }
+
+    @Before
+    fun setUp() {
+        hiltRule.inject()
+        composeTestRule.setContent { AppTheme { LoginScreen(onLoginSuccess = {}) } }
+    }
+
+    @Test
+    fun signInButton_isDisabled_whenFieldsAreEmpty() {
+        robot.assertSignInButtonDisabled()
+    }
+
+    @Test
+    fun signInButton_becomesEnabled_whenBothFieldsAreFilled() {
+        robot
+            .enterEmail("alice@example.com")
+            .enterPassword("Password1")
+            .assertSignInButtonEnabled()
+    }
+
+    @Test
+    fun validCredentials_dismissLoadingAndNavigatesToHome() {
+        fakeAuthRepository.stubbedToken = AuthToken("access123", "refresh456")
+
+        robot
+            .enterEmail("alice@example.com")
+            .enterPassword("Password1")
+            .clickSignIn()
+            .assertLoadingIndicatorVisible()
+
+        composeTestRule.waitUntil(5_000) {
+            composeTestRule.onAllNodesWithTag("home_screen").fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    @Test
+    fun invalidCredentials_showsErrorMessage() {
+        fakeAuthRepository.shouldThrow = InvalidCredentialsException("Invalid password")
+
+        robot
+            .enterEmail("alice@example.com")
+            .enterPassword("WrongPass1")
+            .clickSignIn()
+            .assertErrorDisplayed("Invalid password")
+    }
+
+    @Test
+    fun clearingEmail_disablesSignInButton() {
+        robot
+            .enterEmail("alice@example.com")
+            .enterPassword("Password1")
+            .clearEmail()
+            .assertSignInButtonDisabled()
+    }
+}
+```
+
+### Chaining Robots for Multi-Screen Flows
+
+When a flow spans multiple screens, each robot can return the next robot to keep the scenario readable end-to-end:
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/robot/LoginRobot.kt
+fun clickSignIn(nextRobot: HomeRobot): HomeRobot {
+    rule.onNodeWithText("Sign In").performClick()
+    return nextRobot
+}
+
+// src/androidTest/kotlin/com/example/app/robot/HomeRobot.kt
+class HomeRobot(private val rule: ComposeContentTestRule) {
+
+    fun assertWelcomeMessageDisplayed(name: String) = apply {
+        rule.onNodeWithText("Welcome, $name").assertIsDisplayed()
+    }
+
+    fun tapFirstUser(): UserDetailRobot {
+        rule.onAllNodesWithTag("user_card")[0].performClick()
+        return UserDetailRobot(rule)
+    }
+}
+
+// Multi-screen test reads like a scenario
+@Test
+fun loginFlow_navigatesToHomeAndShowsUserList() {
+    LoginRobot(composeTestRule)
+        .enterEmail("alice@example.com")
+        .enterPassword("Password1")
+        .clickSignIn(HomeRobot(composeTestRule))
+        .assertWelcomeMessageDisplayed("Alice")
+        .tapFirstUser()
+        .assertUserDetailVisible()
+}
+```
+
+### Example: Raw Test vs Robot Test
+
+Compare the same intent written both ways:
+
+```kotlin
+// Without robot
+@Test
+fun invalidCredentials_showsError() {
+    composeTestRule.onNodeWithTag("login_email_field").performTextInput("alice@example.com")
+    composeTestRule.onNodeWithTag("login_password_field").performTextInput("WrongPass1")
+    composeTestRule.onNodeWithText("Sign In").performClick()
+    composeTestRule.onNodeWithText("Invalid password").assertIsDisplayed()
+}
+
+// With robot
+@Test
+fun invalidCredentials_showsError() {
+    LoginRobot(composeTestRule)
+        .enterEmail("alice@example.com")
+        .enterPassword("WrongPass1")
+        .clickSignIn()
+        .assertErrorDisplayed("Invalid password")
+}
+```
+
+The second version is shorter, easier to scan, and resilient to selector changes because the selectors live in one place.
+
+### Common Mistakes
+
+- **Over-abstracting.** Do not create methods so generic that they hide what the user actually does.
+- **Leaking test framework calls into tests.** If every test still uses `onNodeWithTag`, the robot is not buying much.
+- **Putting business logic in robots.** Robots should orchestrate UI interaction, not calculate test expectations.
+- **Creating one mega-robot.** Huge robots become hard to maintain and harder to trust.
+
+> **Tip:** Keep each robot focused on a single screen or component. A robot that knows about two screens is a sign the screens have been tested as a coupled unit, which makes failures harder to diagnose.
+
+---
+
+---
+
+## 5. Test Fixtures
+
+### What are Test Fixtures?
+
+A test fixture is any piece of **reusable code that sets up the known, consistent state** a test needs to run. Fixtures eliminate duplicated setup logic scattered across test classes and ensure tests start from a predictable baseline. The term covers several related patterns:
+
+- **Data factories (Object Mother)** — functions or objects that produce domain model instances with sensible defaults and named overrides.
+- **JUnit Rules** — `@get:Rule` helpers that run setup and teardown around each test method.
+- **Fake implementations** — handwritten interface implementations that return controlled data (covered in Unit Tests, referenced here in context).
+- **Database seeders** — helpers that pre-populate a Room in-memory database before each test.
+
+### Why Use Test Fixtures?
+
+Without fixtures, every test file defines its own `val user = User("u1", "Alice", "alice@example.com", null)`. When the `User` constructor gains a new required parameter, every one of those definitions breaks. With a factory, you change one line and all tests still compile.
+
+Fixtures also make the **signal-to-noise ratio** of each test body much higher. The test body should describe what is being tested, not how to construct the domain objects needed to test it. A test that reads `val user = UserFixture.aUser(name = "Bob")` communicates its intent far better than five lines of constructor calls.
+
+### When to Use Test Fixtures?
+
+Introduce a fixture as soon as:
+- Two or more tests construct the same domain object, even with slight variations.
+- Test `@Before` blocks grow beyond 5–10 lines of setup that is identical across test classes.
+- A schema change (new field, renamed parameter) causes compilation failures in more than one test file.
+
+### How Fixtures Help in Practice
+
+Fixtures solve three recurring problems in Android test suites:
+
+- **Duplication:** the same `User`, `AuthToken`, or DAO setup appears in many files.
+- **Fragility:** model changes ripple through dozens of tests.
+- **Unreadable tests:** setup becomes longer than the assertion.
+
+A good fixture moves repetitive construction into one place while still letting each test override the one field it cares about. That balance is the real goal: less boilerplate without losing clarity.
+
+### How to Choose the Right Fixture Type
+
+Use the smallest fixture that solves the problem:
+
+| Problem | Best fixture |
+|---------|--------------|
+| Repeating model creation | Data factory / Object Mother |
+| Shared dispatcher or cleanup logic | JUnit Rule |
+| Repeated database prepopulation | Database fixture |
+| Repeated dependency behaviour | Fake implementation |
+
+Not every repeated line deserves a fixture. Create one when it improves readability or reduces maintenance cost, not just to hide code.
+
+---
+
+### Data Factory — Object Mother Pattern
+
+The Object Mother pattern centralises all test data creation in one place. Each `a*` method provides an instance with sensible defaults; named parameters let individual tests override only what matters for them.
+
+```kotlin
+// src/test/kotlin/com/example/app/fixtures/UserFixture.kt
+object UserFixture {
+
+    fun aUser(
+        id: String = "user-1",
+        name: String = "Alice Smith",
+        email: String = "alice@example.com",
+        avatarUrl: String? = null
+    ): User = User(id, name, email, avatarUrl)
+
+    fun aListOfUsers(count: Int = 3): List<User> =
+        (1..count).map { i ->
+            aUser(
+                id       = "user-$i",
+                name     = "User $i",
+                email    = "user$i@example.com"
+            )
+        }
+
+    fun anAdminUser(): User = aUser(id = "admin-1", name = "Admin User", email = "admin@example.com")
+}
+
+object UserEntityFixture {
+
+    fun aUserEntity(
+        id: String = "user-1",
+        name: String = "Alice Smith",
+        email: String = "alice@example.com",
+        avatarUrl: String? = null
+    ): UserEntity = UserEntity(id, name, email, avatarUrl)
+
+    fun aListOfUserEntities(count: Int = 3): List<UserEntity> =
+        (1..count).map { i ->
+            aUserEntity(id = "user-$i", name = "User $i", email = "user$i@example.com")
+        }
+}
+
+object AuthFixture {
+
+    fun anAuthToken(
+        accessToken: String  = "access-token-abc",
+        refreshToken: String = "refresh-token-xyz"
+    ): AuthToken = AuthToken(accessToken, refreshToken)
+}
+```
+
+Usage in tests — the test body states only what differs from the default:
+
+```kotlin
+@Test
+fun `getUser returns user by id`() = runTest {
+    val user = UserFixture.aUser(id = "target-user")
+    fakeUserRepository.stubbedUser = user
+
+    val result = getUserUseCase(GetUserUseCase.Params("target-user"))
+
+    assertThat(result.getOrThrow().id).isEqualTo("target-user")
+}
+
+@Test
+fun `user list shows all loaded users`() = runTest {
+    fakeUserRepository.stubbedUsers = UserFixture.aListOfUsers(count = 5)
+
+    viewModel.loadUsers()
+
+    assertThat((viewModel.uiState.value as UserListUiState.Success).users).hasSize(5)
+}
+```
+
+### Fixture Naming and Structure
+
+A few naming conventions make fixtures easier to scan:
+
+- Prefix builders with `a` or `an`: `aUser()`, `anAuthToken()`.
+- Keep defaults valid and realistic so a fixture represents a normal state first.
+- Use named parameters for overrides so tests remain self-documenting.
+- Place fixtures in `src/test/fixtures` or `src/androidTest/fixtures` close to the tests that use them.
+
+Avoid putting fixtures in `src/main/`. They are test support code, not production code.
+
+---
+
+### JUnit Rule as a Fixture
+
+A `TestWatcher`-based JUnit Rule runs code before and after every test method in the class, giving you guaranteed setup and teardown without relying on `@Before` / `@After` methods across every test class that needs it.
+
+```kotlin
+// src/test/kotlin/com/example/app/fixtures/MainDispatcherRule.kt
+@OptIn(ExperimentalCoroutinesApi::class)
+class MainDispatcherRule(
+    val dispatcher: TestCoroutineDispatcher = TestCoroutineDispatcher()
+) : TestWatcher() {
+
+    override fun starting(description: Description) = Dispatchers.setMain(dispatcher)
+
+    override fun finished(description: Description) {
+        Dispatchers.resetMain()
+        dispatcher.cleanupTestCoroutines()
+    }
+}
+
+// src/test/kotlin/com/example/app/fixtures/MockkClearRule.kt
+// Automatically resets all MockK state between tests — prevents leakage
+class MockkClearRule : TestWatcher() {
+    override fun finished(description: Description) = clearAllMocks()
+}
+```
+
+Combine multiple fixture rules in one test class:
+
+```kotlin
+class UserDetailViewModelTest {
+
+    @get:Rule val mainDispatcherRule = MainDispatcherRule()
+    @get:Rule val mockkClearRule     = MockkClearRule()
+
+    private val mockAnalytics = mockk<AnalyticsTracker>(relaxed = true)
+    private val fakeRepo      = FakeUserRepository()
+    private val viewModel     = UserDetailViewModel(fakeRepo, mockAnalytics)
+
+    @Test
+    fun `loads user on init`() = runTest {
+        fakeRepo.stubbedUser = UserFixture.aUser()
+        // mockk state is clean — no leakage from previous test
+        val state = viewModel.uiState.value
+        assertThat(state).isInstanceOf(UserDetailUiState.Success::class.java)
+    }
+}
+```
+
+### Why Rules Are Useful Fixtures
+
+Rules are ideal when setup and teardown must always happen together. Replacing `Dispatchers.Main`, clearing mocks, creating temp files, or resetting clocks are all examples where a rule is safer than remembering to duplicate code in every `@Before` and `@After` pair.
+
+They also reduce accidental omissions. If a test class needs the main dispatcher replaced, a rule makes that dependency visible at the top of the class instead of buried in setup code.
+
+---
+
+### Database Fixture — Seeding Room for Integration Tests
+
+For DAO and repository integration tests, a fixture helper pre-populates the in-memory database in one call:
+
+```kotlin
+// src/androidTest/kotlin/com/example/app/fixtures/DatabaseFixture.kt
+class DatabaseFixture(private val database: AppDatabase) {
+
+    suspend fun seedUser(vararg users: UserEntity = arrayOf(UserEntityFixture.aUserEntity())) {
+        database.userDao().upsertAll(users.toList())
+    }
+
+    suspend fun seedUsers(count: Int) {
+        database.userDao().upsertAll(UserEntityFixture.aListOfUserEntities(count))
+    }
+
+    suspend fun clear() {
+        database.clearAllTables()
+    }
+}
+```
+
+Usage in a Room DAO test:
+
+```kotlin
+@RunWith(AndroidJUnit4::class)
+class UserDaoTest {
+
+    private lateinit var database: AppDatabase
+    private lateinit var db: DatabaseFixture
+
+    @Before
+    fun setUp() {
+        database = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            AppDatabase::class.java
+        ).allowMainThreadQueries().build()
+        db = DatabaseFixture(database)
+    }
+
+    @After
+    fun tearDown() = database.close()
+
+    @Test
+    fun search_returnsMatchingUsers_afterSeed() = runTest {
+        db.seedUser(
+            UserEntityFixture.aUserEntity(id = "u1", name = "Alice Smith"),
+            UserEntityFixture.aUserEntity(id = "u2", name = "Bob Jones")
+        )
+
+        val results = database.userDao().search("alice").first()
+
+        assertThat(results).hasSize(1)
+        assertThat(results[0].name).isEqualTo("Alice Smith")
+    }
+
+    @Test
+    fun findById_returnsNull_onEmptyDb() = runTest {
+        // db.clear() not needed — inMemoryDatabase starts empty
+        assertThat(database.userDao().findById("nonexistent")).isNull()
+    }
+
+    @Test
+    fun upsertAll_thenSearch_returnsAllMatches() = runTest {
+        db.seedUsers(count = 10)
+
+        val all = database.userDao().search("user").first()
+
+        assertThat(all).hasSize(10)
+    }
+}
+```
+
+### How to Keep Fixtures Safe
+
+Fixtures should increase determinism, not hide shared mutable state. Follow these rules:
+
+- Return new objects by default instead of reusing mutable singletons.
+- Reset fake state between tests.
+- Avoid random values unless the test explicitly needs them.
+- Keep default dates, IDs, and strings stable so failures are reproducible.
+- Prefer immutable fixture data for unit tests.
+
+If a fixture stores mutable lists or counters globally, tests can start influencing each other. That is one of the fastest ways to create order-dependent failures.
+
+---
+
+### Combining Fixtures and Robots
+
+Fixtures and robots work well together. Fixtures handle data and state setup; robots handle UI interaction. The test body reads as a clean scenario:
+
+```kotlin
+@HiltAndroidTest
+@RunWith(AndroidJUnit4::class)
+class UserListScreenTest {
+
+    @get:Rule(order = 0) val hiltRule = HiltAndroidRule(this)
+    @get:Rule(order = 1) val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    @Inject lateinit var fakeUserRepository: FakeUserRepository
+
+    private val robot by lazy { UserListRobot(composeTestRule) }
+
+    @Before
+    fun setUp() {
+        hiltRule.inject()
+        // Fixture provides the data; the test doesn't build User objects inline
+        fakeUserRepository.stubbedUsers = UserFixture.aListOfUsers(count = 3)
+        composeTestRule.setContent { AppTheme { UserListScreen(onNavigateToDetail = {}) } }
+    }
+
+    @Test
+    fun displaysAllLoadedUsers() {
+        robot
+            .assertUserCount(3)
+            .assertUserNameVisible("User 1")
+            .assertUserNameVisible("User 2")
+            .assertUserNameVisible("User 3")
+    }
+
+    @Test
+    fun tappingUser_opensDetailScreen() {
+        robot
+            .tapUserAtIndex(0)
+            .assertDetailScreenVisible()
+    }
+}
+```
+
+> **Note:** The fixture (`UserFixture.aListOfUsers`) decouples the test from the shape of `User`. If a new field is added to `User`, only `UserFixture` needs updating — the test body is unchanged.
+
+### Common Mistakes
+
+- **Fixture bloat:** giant factories that know every edge case in the app.
+- **Hidden intent:** helpers with vague names like `createData1()`.
+- **Shared mutable defaults:** a default `mutableListOf()` reused across tests.
+- **Over-centralisation:** one global fixture file for the whole project becomes hard to navigate.
+
+A good fixture should make a test easier to understand after one quick read. If the helper makes the setup more mysterious, simplify it.
+
+---
+
+### Best Practices for Fixtures
+
+| Practice | Reason |
+|----------|--------|
+| Keep factory defaults realistic | Tests that use a valid default catch more real-world bugs than tests seeded with dummy strings like `"test"` |
+| Override only what the test cares about | `UserFixture.aUser(email = "")` states the intention clearly — the blank email is what matters, everything else is noise |
+| Name factories with `a` / `an` prefix | `aUser()`, `anAuthToken()` reads naturally in test bodies |
+| Never share mutable fixture state between tests | Shared mutable state causes test-order dependencies; reset in `@Before` or use `TestWatcher` |
+| Co-locate fixtures with tests, not with production code | Fixture classes belong in `src/test/` or `src/androidTest/`, never `src/main/` |
+| Use `@After` / `TestWatcher.finished` to clean up resources | Unclosed databases and uncleared MockK state cause false positives in subsequent tests |
+
+---
+
+---
+
+## 6. Unit Tests
 
 ### What are Unit Tests?
 
@@ -568,7 +1468,9 @@ class SearchViewModelTest {
 
 ---
 
-## 4. Integration Tests
+---
+
+## 7. Integration Tests
 
 ### What are Integration Tests?
 
@@ -899,7 +1801,9 @@ class DependencyGraphTest {
 
 ---
 
-## 5. UI Tests with Jetpack Compose
+---
+
+## 8. UI Tests with Jetpack Compose
 
 ### What are UI Tests?
 
@@ -1181,7 +2085,9 @@ composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
 
 ---
 
-## 6. Screenshot Tests
+---
+
+## 9. Screenshot Tests
 
 ### What are Screenshot Tests?
 
