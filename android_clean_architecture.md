@@ -5,50 +5,79 @@
 ## Table of Contents
 
 1. [MVVM Architecture](#1-mvvm-architecture)
-2. [SOLID Principles](#2-solid-principles)
-3. [Clean Code](#3-clean-code)
-4. [Data Sources](#4-data-sources)
-5. [Repositories](#5-repositories)
-6. [Use Cases](#6-use-cases)
-7. [ViewModel](#7-viewmodel)
-8. [Jetpack Compose](#8-jetpack-compose)
-9. [Network Operations with OkHttp](#9-network-operations-with-okhttp)
-10. [Dependency Injection with Hilt](#10-dependency-injection-with-hilt)
-11. [Data Storage](#11-data-storage)
+2. [Recommended Codebase Structure](#2-recommended-codebase-structure)
+3. [SOLID Principles](#3-solid-principles)
+4. [Clean Code](#4-clean-code)
+5. [Data Sources](#5-data-sources)
+6. [Repositories](#6-repositories)
+7. [Use Cases](#7-use-cases)
+8. [ViewModel](#8-viewmodel)
+9. [Jetpack Compose](#9-jetpack-compose)
+10. [Network Operations with OkHttp](#10-network-operations-with-okhttp)
+11. [Dependency Injection with Hilt](#11-dependency-injection-with-hilt)
+12. [Data Storage](#12-data-storage)
     - [Room](#room)
     - [SharedPreferences & SecureSharedPreferences](#sharedpreferences--securesharedpreferences)
-12. [Image Loading with COIL](#12-image-loading-with-coil)
+13. [Image Loading with COIL](#13-image-loading-with-coil)
 
 ---
 
 ## 1. MVVM Architecture
 
-Model-View-ViewModel (MVVM) is the recommended architectural pattern for Android development. It separates UI logic from business logic and promotes testability, maintainability, and separation of concerns.
+### What is MVVM?
 
-### Layer Overview
+Model-View-ViewModel (MVVM) is a software architectural pattern that separates an application into three interconnected layers:
+
+- **Model** — the data and business logic layer (repositories, data sources, domain models).
+- **View** — the UI layer (Composables, Activities, Fragments) that displays data and captures user input.
+- **ViewModel** — the mediator that holds and exposes UI state, handles user events, and communicates with the Model.
+
+MVVM is the officially recommended architecture for Android by Google and forms the backbone of the modern Android development stack (Jetpack, Compose, Hilt).
+
+### Why MVVM?
+
+Before MVVM, developers used MVC (where Activity was the Controller) or MVP (where a Presenter held a direct View reference). Both caused serious problems:
+
+| Pattern | Core Problem |
+|---------|-------------|
+| MVC | Activity mixes UI, input handling, and business logic. Untestable without a device. |
+| MVP | Presenter holds View reference → memory leaks on rotation. Manual lifecycle management required. |
+| MVVM | ViewModel has no reference to the View. Survives configuration changes. All logic is JVM unit-testable. |
+
+### When to Use MVVM?
+
+Always — for any screen in your app, no matter how simple. Even a single-screen app benefits from MVVM because it separates concerns and makes the screen testable from day one.
+
+### Unidirectional Data Flow (UDF)
+
+MVVM in Android follows a strict UDF model. Events flow *up* from View to ViewModel; state flows *down* from ViewModel to View. State never travels backwards.
 
 ```
 ┌─────────────────────────────────────┐
 │               View                  │  ← Activity / Fragment / Composable
-│   Observes StateFlow / LiveData     │
-└────────────────┬────────────────────┘
-                 │ observes
-┌────────────────▼────────────────────┐
-│             ViewModel               │  ← Holds UI state, calls UseCases
-│   No Android framework dependencies │
-└────────────────┬────────────────────┘
-                 │ calls
-┌────────────────▼────────────────────┐
-│             Use Case                │  ← Single business operation
-└────────────────┬────────────────────┘
-                 │ calls
-┌────────────────▼────────────────────┐
-│            Repository               │  ← Abstracts data origin
-└────────────────┬────────────────────┘
-                 │ reads/writes
-┌────────────────▼────────────────────┐
-│           Data Sources              │  ← Remote API / Local DB / Cache
-└─────────────────────────────────────┘
+│   Renders state. Forwards events.   │
+└──────────┬────────────▲─────────────┘
+           │ Events     │ UiState
+           ▼            │
+┌──────────────────────────────────────┐
+│             ViewModel                │  ← Holds UI state, calls UseCases
+│   No Android framework dependencies  │
+└──────────┬────────────▲──────────────┘
+           │ Calls      │ Result<T>
+           ▼            │
+┌──────────────────────────────────────┐
+│             Use Case                 │  ← Single business operation
+└──────────┬────────────▲──────────────┘
+           │ Reads/     │ Domain
+           ▼ Writes     │ Models
+┌──────────────────────────────────────┐
+│            Repository                │  ← Abstracts data origin
+└──────────┬────────────▲──────────────┘
+           │            │
+           ▼            │
+┌──────────────────────────────────────┐
+│           Data Sources               │  ← Remote API / Local DB / Cache
+└──────────────────────────────────────┘
 ```
 
 ### Key Principles
@@ -60,27 +89,28 @@ Model-View-ViewModel (MVVM) is the recommended architectural pattern for Android
 
 ### Complete MVVM Example
 
-**Domain model:**
+**Domain model — pure Kotlin, zero Android imports:**
 
 ```kotlin
 data class User(
     val id: String,
     val name: String,
-    val email: String
+    val email: String,
+    val avatarUrl: String?
 )
 ```
 
-**UI State:**
+**UI State — models every possible screen state explicitly:**
 
 ```kotlin
 sealed class UserUiState {
     object Loading : UserUiState()
     data class Success(val user: User) : UserUiState()
-    data class Error(val message: String) : UserUiState()
+    data class Error(val message: String, val canRetry: Boolean = true) : UserUiState()
 }
 ```
 
-**ViewModel:**
+**ViewModel — the single source of truth for the UI:**
 
 ```kotlin
 @HiltViewModel
@@ -94,15 +124,20 @@ class UserViewModel @Inject constructor(
     fun loadUser(userId: String) {
         viewModelScope.launch {
             _uiState.value = UserUiState.Loading
-            getUserUseCase(userId)
+            getUserUseCase(GetUserUseCase.Params(userId))
                 .onSuccess { user -> _uiState.value = UserUiState.Success(user) }
-                .onFailure { e -> _uiState.value = UserUiState.Error(e.message ?: "Unknown error") }
+                .onFailure { e ->
+                    _uiState.value = UserUiState.Error(
+                        message  = e.message ?: "Unknown error",
+                        canRetry = e is IOException
+                    )
+                }
         }
     }
 }
 ```
 
-**Composable View:**
+**Composable View — reacts to state, forwards events:**
 
 ```kotlin
 @Composable
@@ -117,300 +152,620 @@ fun UserScreen(
     when (val state = uiState) {
         is UserUiState.Loading -> CircularProgressIndicator()
         is UserUiState.Success -> UserContent(state.user)
-        is UserUiState.Error   -> ErrorMessage(state.message)
+        is UserUiState.Error   -> ErrorMessage(
+            message = state.message,
+            onRetry = if (state.canRetry) ({ viewModel.loadUser(userId) }) else null
+        )
+    }
+}
+```
+
+### Unit Testing the ViewModel
+
+The ViewModel has zero Android framework dependencies, so it can be tested with plain JUnit + coroutines:
+
+```kotlin
+@OptIn(ExperimentalCoroutinesApi::class)
+class UserViewModelTest {
+
+    @get:Rule val mainDispatcherRule = MainDispatcherRule()
+
+    private val fakeGetUserUseCase = FakeGetUserUseCase()
+    private lateinit var viewModel: UserViewModel
+
+    @Before
+    fun setUp() { viewModel = UserViewModel(fakeGetUserUseCase) }
+
+    @Test
+    fun `loadUser emits Success when use case returns user`() = runTest {
+        val user = User("1", "Alice", "alice@example.com", null)
+        fakeGetUserUseCase.result = Result.success(user)
+
+        viewModel.loadUser("1")
+
+        assertThat(viewModel.uiState.value).isEqualTo(UserUiState.Success(user))
+    }
+
+    @Test
+    fun `loadUser emits Error when use case fails`() = runTest {
+        fakeGetUserUseCase.result = Result.failure(IOException("No network"))
+
+        viewModel.loadUser("1")
+
+        val state = viewModel.uiState.value as UserUiState.Error
+        assertThat(state.canRetry).isTrue()
     }
 }
 ```
 
 ---
 
-## 2. SOLID Principles
+## 2. Recommended Codebase Structure
 
-SOLID is a set of five design principles that lead to more maintainable, flexible, and understandable code.
+### What is It?
+
+A well-defined codebase structure is a consistent, agreed-upon arrangement of files and packages that reflects the architectural boundaries of the application. It is not just a folder convention — it is a physical enforcement of the dependency rules in Clean Architecture.
+
+### Why Structure Matters
+
+Without a clear structure:
+- Developers place logic in the wrong layer (business rules inside the ViewModel or Composable).
+- Cross-layer dependencies accumulate silently and become impossible to untangle.
+- Onboarding new developers takes days instead of hours.
+- Testing becomes fragile because tightly coupled layers cannot be isolated.
+
+A well-structured project makes the architecture self-documenting — you can open any folder and instantly understand what lives there and what it depends on.
+
+### When to Apply It
+
+Apply the structure from the very first commit. Retrofitting it onto a large, flat project is expensive. The cost of getting structure right at the start is zero; the cost of ignoring it grows with every new feature.
+
+### Layer Dependency Rules
+
+The core rule: **dependencies only point inward**.
+
+```
+presentation  ──►  domain  ◄──  data
+```
+
+- `domain` knows nothing about `data` or `presentation`.
+- `data` implements interfaces defined in `domain`.
+- `presentation` calls use cases from `domain` and never accesses `data` directly.
+
+### Single-Module Package Structure
+
+For most apps, a single Gradle module with feature-based sub-packages is the right starting point:
+
+```
+com.example.app/
+│
+├── MyApplication.kt                  # @HiltAndroidApp entry point
+│
+├── di/                               # Hilt dependency injection modules
+│   ├── NetworkModule.kt
+│   ├── DatabaseModule.kt
+│   ├── RepositoryModule.kt
+│   └── DataSourceModule.kt
+│
+├── domain/                           # Pure Kotlin — zero Android/framework imports
+│   ├── model/                        # Domain entities (User, Product, Order…)
+│   │   └── User.kt
+│   ├── repository/                   # Repository interfaces (contracts)
+│   │   └── UserRepository.kt
+│   └── usecase/                      # One class per business operation
+│       ├── GetUserUseCase.kt
+│       ├── LoginUseCase.kt
+│       └── ObserveUsersUseCase.kt
+│
+├── data/                             # Implements domain interfaces
+│   ├── remote/
+│   │   ├── api/
+│   │   │   └── UserApiService.kt     # Retrofit interface
+│   │   ├── dto/
+│   │   │   └── UserDto.kt            # JSON-mapped data class
+│   │   └── datasource/
+│   │       └── UserRemoteDataSourceImpl.kt
+│   ├── local/
+│   │   ├── database/
+│   │   │   └── AppDatabase.kt        # Room database
+│   │   ├── dao/
+│   │   │   └── UserDao.kt
+│   │   ├── entity/
+│   │   │   └── UserEntity.kt
+│   │   └── datasource/
+│   │       └── UserLocalDataSourceImpl.kt
+│   ├── preferences/
+│   │   ├── AppPreferences.kt         # SharedPreferences wrapper
+│   │   └── SecurePreferences.kt      # EncryptedSharedPreferences wrapper
+│   ├── mapper/
+│   │   └── UserMappers.kt            # Extension functions: Dto→Domain, Entity→Domain
+│   └── repository/
+│       └── UserRepositoryImpl.kt
+│
+└── presentation/                     # UI layer — Compose screens + ViewModels
+    ├── navigation/
+    │   └── AppNavHost.kt             # NavHost + all route definitions
+    ├── theme/
+    │   ├── AppTheme.kt
+    │   ├── Color.kt
+    │   └── Type.kt
+    └── feature/
+        ├── userlist/
+        │   ├── UserListScreen.kt
+        │   ├── UserListViewModel.kt
+        │   └── UserListUiState.kt
+        └── userdetail/
+            ├── UserDetailScreen.kt
+            ├── UserDetailViewModel.kt
+            └── UserDetailUiState.kt
+```
+
+### Multi-Module Structure (Large Teams / Apps)
+
+For apps with multiple teams or features that need strict isolation, split into Gradle modules:
+
+```
+:app                    # Entry point — ties everything together
+:core:domain            # Pure Kotlin — interfaces, models, use case bases
+:core:data              # Implements :core:domain interfaces
+:core:network           # OkHttp, Retrofit, interceptors
+:core:database          # Room database, DAOs, entities
+:core:ui                # Shared Composables, theme, design system
+:feature:userlist       # Self-contained feature: screen + ViewModel
+:feature:userdetail     # Self-contained feature: screen + ViewModel
+:feature:auth           # Login / registration flow
+```
+
+Each `:feature` module depends only on `:core:domain` (not on `:core:data`), enforcing the clean architecture boundary at the build level.
+
+### File Naming Conventions
+
+| Layer | Suffix | Example |
+|-------|--------|---------|
+| Domain model | *(none)* | `User.kt` |
+| Remote DTO | `Dto` | `UserDto.kt` |
+| Room Entity | `Entity` | `UserEntity.kt` |
+| Room DAO | `Dao` | `UserDao.kt` |
+| Remote data source | `RemoteDataSourceImpl` | `UserRemoteDataSourceImpl.kt` |
+| Local data source | `LocalDataSourceImpl` | `UserLocalDataSourceImpl.kt` |
+| Repository interface | `Repository` | `UserRepository.kt` |
+| Repository impl | `RepositoryImpl` | `UserRepositoryImpl.kt` |
+| Use case | `UseCase` | `GetUserUseCase.kt` |
+| ViewModel | `ViewModel` | `UserListViewModel.kt` |
+| Composable screen | `Screen` | `UserListScreen.kt` |
+| UI state | `UiState` | `UserListUiState.kt` |
+| Hilt module | `Module` | `NetworkModule.kt` |
+
+---
+
+## 3. SOLID Principles
+
+### What are SOLID Principles?
+
+SOLID is an acronym for five object-oriented design principles introduced by Robert C. Martin. They guide developers toward writing code that is maintainable, extensible, and robust against change.
+
+### Why Use SOLID?
+
+Code that violates SOLID principles becomes a "big ball of mud" — a system where changing one thing unexpectedly breaks another, where classes grow without limit, and where adding a new feature requires touching dozens of files. SOLID principles are preventive medicine for these problems.
+
+### When to Apply SOLID?
+
+Always, but especially when you feel the urge to add "just one more thing" to an existing class. Each violation feels harmless in isolation; the damage accumulates over months.
+
+---
 
 ### S — Single Responsibility Principle (SRP)
 
 > A class should have only one reason to change.
 
-**Bad:**
+**What it means:** Each class should do exactly one job. If it needs to change for two different reasons, it violates SRP.
+
+**Why it matters:** Small, focused classes are easy to understand, test, and change in isolation.
+
+**Android violation — the God Activity:**
 
 ```kotlin
-class UserManager {
-    fun fetchUserFromApi(id: String): User { /* ... */ }
-    fun saveUserToDatabase(user: User) { /* ... */ }
-    fun sendWelcomeEmail(user: User) { /* ... */ }
-    fun formatUserName(user: User): String { /* ... */ }
+class UserActivity : AppCompatActivity() {
+    fun loadUser(id: String) {
+        val response = URL("https://api.example.com/users/$id").readText()
+        val json = JSONObject(response)
+        val user = User(json.getString("id"), json.getString("name"))
+        database.save(user)
+        nameTextView.text = "${user.name.uppercase()} (${user.id})"
+    }
 }
 ```
 
-**Good:**
+**Corrected — each class has one job:**
 
 ```kotlin
-class UserRepository(private val api: UserApi, private val db: UserDao) {
-    suspend fun getUser(id: String): User = api.fetchUser(id)
-    suspend fun saveUser(user: User) = db.insert(user)
+class UserRemoteDataSourceImpl @Inject constructor(
+    private val apiService: UserApiService
+) : UserRemoteDataSource {
+    override suspend fun fetchUser(id: String): UserDto = apiService.getUser(id)
 }
 
-class EmailService {
-    fun sendWelcomeEmail(user: User) { /* ... */ }
+class UserLocalDataSourceImpl @Inject constructor(
+    private val userDao: UserDao
+) : UserLocalDataSource {
+    override suspend fun saveUser(user: UserEntity) = userDao.upsert(user)
 }
 
 class UserFormatter {
-    fun formatName(user: User): String = "${user.firstName} ${user.lastName}"
-}
-```
-
-### O — Open/Closed Principle (OCP)
-
-> Software entities should be open for extension, but closed for modification.
-
-```kotlin
-// Closed for modification
-interface NotificationSender {
-    fun send(message: String, recipient: String)
-}
-
-// Open for extension
-class EmailNotificationSender : NotificationSender {
-    override fun send(message: String, recipient: String) { /* send email */ }
-}
-
-class PushNotificationSender : NotificationSender {
-    override fun send(message: String, recipient: String) { /* send push */ }
-}
-
-class SmsNotificationSender : NotificationSender {
-    override fun send(message: String, recipient: String) { /* send SMS */ }
-}
-
-// Consumer does not change when new sender types are added
-class NotificationService(private val sender: NotificationSender) {
-    fun notify(message: String, recipient: String) = sender.send(message, recipient)
-}
-```
-
-### L — Liskov Substitution Principle (LSP)
-
-> Subtypes must be substitutable for their base types without altering program correctness.
-
-```kotlin
-abstract class Shape {
-    abstract fun area(): Double
-}
-
-class Rectangle(val width: Double, val height: Double) : Shape() {
-    override fun area() = width * height
-}
-
-class Circle(val radius: Double) : Shape() {
-    override fun area() = Math.PI * radius * radius
-}
-
-// Works correctly with any Shape subtype
-fun printArea(shape: Shape) {
-    println("Area: ${shape.area()}")
-}
-```
-
-### I — Interface Segregation Principle (ISP)
-
-> Clients should not be forced to depend on interfaces they do not use.
-
-**Bad:**
-
-```kotlin
-interface UserRepository {
-    suspend fun getUser(id: String): User
-    suspend fun saveUser(user: User)
-    suspend fun deleteUser(id: String)
-    suspend fun generateReport(): Report   // Not every client needs this
-}
-```
-
-**Good:**
-
-```kotlin
-interface UserReader {
-    suspend fun getUser(id: String): User
-}
-
-interface UserWriter {
-    suspend fun saveUser(user: User)
-    suspend fun deleteUser(id: String)
-}
-
-interface UserReporter {
-    suspend fun generateReport(): Report
-}
-
-class UserRepositoryImpl : UserReader, UserWriter, UserReporter { /* ... */ }
-```
-
-### D — Dependency Inversion Principle (DIP)
-
-> High-level modules should not depend on low-level modules. Both should depend on abstractions.
-
-```kotlin
-// Abstraction (in domain layer)
-interface UserRepository {
-    suspend fun getUser(id: String): Result<User>
-}
-
-// High-level module depends on abstraction
-class GetUserUseCase(private val repository: UserRepository) {
-    suspend operator fun invoke(id: String): Result<User> = repository.getUser(id)
-}
-
-// Low-level module implements abstraction (in data layer)
-class UserRepositoryImpl(
-    private val remoteDataSource: UserRemoteDataSource,
-    private val localDataSource: UserLocalDataSource
-) : UserRepository {
-    override suspend fun getUser(id: String): Result<User> =
-        runCatching { remoteDataSource.fetchUser(id) }
+    fun formatDisplayName(user: User): String = "${user.name.uppercase()} (${user.id})"
 }
 ```
 
 ---
 
-## 3. Clean Code
+### O — Open/Closed Principle (OCP)
 
-Clean code is readable, simple, and expressive. It reduces cognitive load and makes future changes safer.
+> Software entities should be open for extension, but closed for modification.
+
+**What it means:** Add new behavior by adding new classes, not by editing existing ones.
+
+**Why it matters:** Every time you modify tested, working code, you risk regressions.
+
+```kotlin
+interface PaymentProcessor {
+    suspend fun process(amount: Double, currency: String): PaymentResult
+}
+
+class StripePaymentProcessor @Inject constructor(private val api: StripeApi) : PaymentProcessor {
+    override suspend fun process(amount: Double, currency: String) = api.charge(amount, currency).toResult()
+}
+
+class PayPalPaymentProcessor @Inject constructor(private val api: PayPalApi) : PaymentProcessor {
+    override suspend fun process(amount: Double, currency: String) = api.createPayment(amount, currency).toResult()
+}
+
+// Adding Google Pay requires zero changes to CheckoutUseCase
+class CheckoutUseCase @Inject constructor(
+    private val paymentProcessor: PaymentProcessor
+) {
+    suspend fun execute(order: Order): Result<PaymentResult> = runCatching {
+        paymentProcessor.process(order.total, order.currency)
+    }
+}
+```
+
+---
+
+### L — Liskov Substitution Principle (LSP)
+
+> Subtypes must be substitutable for their base types without altering program correctness.
+
+**What it means:** A subtype must honour the contract of its base type — same expectations, no surprise exceptions.
+
+**Why it matters:** Violations break polymorphism. If callers must check `is Square` before using a `Shape`, the abstraction is broken.
+
+```kotlin
+// Violation: Penguin breaks the Bird contract
+open class Bird { open fun fly() {} }
+class Penguin : Bird() { override fun fly() = throw UnsupportedOperationException() }
+
+// Corrected: segregate capabilities into separate interfaces
+interface FlyingBird { fun fly() }
+interface SwimmingBird { fun swim() }
+
+class Eagle : FlyingBird { override fun fly() { /* soar */ } }
+class Penguin : SwimmingBird { override fun swim() { /* dive */ } }
+```
+
+---
+
+### I — Interface Segregation Principle (ISP)
+
+> Clients should not be forced to depend on interfaces they do not use.
+
+**What it means:** Prefer many small, focused interfaces over one large general-purpose interface.
+
+**Why it matters:** Fat interfaces create unnecessary coupling and force implementations to provide methods they don't need.
+
+```kotlin
+// Bad — every client depends on all four capabilities
+interface UserRepository {
+    suspend fun getUser(id: String): User
+    suspend fun saveUser(user: User)
+    suspend fun exportToCsv(): ByteArray
+    suspend fun generateReport(): Report
+}
+
+// Good — fine-grained contracts, composed by the implementation
+interface UserReader  { suspend fun getUser(id: String): Result<User> }
+interface UserWriter  { suspend fun saveUser(user: User): Result<Unit> }
+interface UserExporter { suspend fun exportToCsv(): Result<ByteArray> }
+
+class UserRepositoryImpl : UserReader, UserWriter, UserExporter { /* ... */ }
+
+class UserListViewModel @Inject constructor(private val reader: UserReader) : ViewModel()
+class AdminViewModel @Inject constructor(
+    private val reader: UserReader,
+    private val exporter: UserExporter
+) : ViewModel()
+```
+
+---
+
+### D — Dependency Inversion Principle (DIP)
+
+> High-level modules should not depend on low-level modules. Both should depend on abstractions.
+
+**What it means:** Business logic depends on interfaces, never on concrete implementations like Room DAOs or Retrofit services.
+
+**Why it matters:** Swapping a database or network library becomes a one-class change, not a rewrite.
+
+```kotlin
+// Domain layer — the abstraction
+interface UserRepository { suspend fun getUser(id: String): Result<User> }
+
+// Domain layer — depends only on the abstraction
+class GetUserUseCase @Inject constructor(private val repo: UserRepository) {
+    suspend operator fun invoke(id: String) = repo.getUser(id)
+}
+
+// Data layer — the detail, implements the abstraction
+class UserRepositoryImpl @Inject constructor(
+    private val remote: UserRemoteDataSource,
+    private val local: UserLocalDataSource
+) : UserRepository {
+    override suspend fun getUser(id: String): Result<User> = runCatching {
+        local.getUser(id)?.toDomain() ?: remote.fetchUser(id).toDomain()
+    }
+}
+
+// Hilt wires them together — the domain never knows about the impl
+@Binds abstract fun bindUserRepository(impl: UserRepositoryImpl): UserRepository
+```
+
+---
+
+## 4. Clean Code
+
+### What is Clean Code?
+
+Clean code is code that is easy to read, easy to change, and easy to verify. It is written for the next developer, not just for the compiler. Robert C. Martin defines it as: *"Clean code reads like well-written prose."*
+
+### Why Write Clean Code?
+
+Software spends 80% of its lifetime in maintenance. Every minute saved reading confusing code multiplies across an entire team over months. Clean code is not cosmetic — it is economic.
+
+### When to Write Clean Code?
+
+Always, from the first line. "We'll clean it up later" is almost always false.
+
+---
 
 ### Naming
 
 ```kotlin
 // Bad
-fun calc(a: Int, b: Int): Int = a + b
+fun calc(a: Int, b: Int, t: Double): Double = (a + b) * t
 val d = 86400
+val usrs = mutableListOf<User>()
 
 // Good
-fun calculateTotalPrice(basePrice: Int, taxAmount: Int): Int = basePrice + taxAmount
+fun calculateOrderTotal(basePrice: Int, taxAmount: Int, discountRate: Double): Double =
+    (basePrice + taxAmount) * (1.0 - discountRate)
 val secondsInADay = 86_400
+val activeUsers = mutableListOf<User>()
 ```
+
+Booleans always use `is`, `has`, `can`, `should` prefixes:
+
+```kotlin
+val isEmailValid: Boolean
+val hasNetworkError: Boolean
+val canUserEdit: Boolean
+val shouldShowOnboarding: Boolean
+```
+
+---
 
 ### Functions
 
-- Do one thing only.
-- Keep them short (ideally under 20 lines).
-- Use descriptive names — avoid comments that explain WHAT; write code that explains itself.
+A function should do exactly one thing. If you need "and" in its name, it's doing two things.
 
 ```kotlin
-// Bad
-fun process(u: User): Boolean {
-    // check if email is valid
+// Bad — validates, persists, and notifies in one function
+fun processUser(u: User): Boolean {
     if (!u.email.contains("@")) return false
-    // save to db
     db.save(u)
-    // send notification
     emailService.send(u.email, "Welcome!")
     return true
 }
 
-// Good
+// Good — each step is independently named, readable, and testable
 fun registerUser(user: User): Result<Unit> = runCatching {
-    require(isValidEmail(user.email)) { "Invalid email: ${user.email}" }
+    validateUser(user)
     userRepository.save(user)
     notificationService.sendWelcomeEmail(user)
 }
 
-private fun isValidEmail(email: String): Boolean =
-    email.contains("@") && email.contains(".")
+private fun validateUser(user: User) {
+    require(user.email.isValidEmail()) { "Invalid email: ${user.email}" }
+    require(user.name.isNotBlank()) { "Name cannot be blank" }
+}
 ```
+
+---
 
 ### Avoid Magic Numbers and Strings
 
 ```kotlin
 // Bad
 if (response.code == 401) logout()
+delay(3000)
 
 // Good
 private const val HTTP_UNAUTHORIZED = 401
+private const val LOGOUT_DELAY_MS   = 3_000L
 
 if (response.code == HTTP_UNAUTHORIZED) logout()
+delay(LOGOUT_DELAY_MS)
 ```
+
+---
 
 ### Null Safety
 
-Leverage Kotlin's type system to eliminate null-pointer exceptions:
-
 ```kotlin
-// Bad (Java-style null checks)
-fun getUsername(user: User?): String {
-    if (user != null && user.name != null) {
-        return user.name
-    }
+// Bad — verbose Java-style null guards
+fun getDisplayName(user: User?): String {
+    if (user != null && user.name != null && user.name.isNotEmpty()) return user.name
     return "Guest"
 }
 
-// Good (idiomatic Kotlin)
-fun getUsername(user: User?): String = user?.name ?: "Guest"
+// Good — idiomatic Kotlin
+fun getDisplayName(user: User?): String =
+    user?.name?.takeIf { it.isNotEmpty() } ?: "Guest"
 ```
+
+---
 
 ### Error Handling with Result
 
 ```kotlin
 suspend fun loadProfile(userId: String): Result<UserProfile> = runCatching {
-    val user = userRepository.getUser(userId).getOrThrow()
-    val posts = postRepository.getPostsByUser(userId).getOrThrow()
+    val user  = userRepository.getUser(userId).getOrThrow()
+    val posts = postRepository.getPosts(userId).getOrThrow()
     UserProfile(user, posts)
 }
 
-// Caller
 viewModelScope.launch {
     loadProfile(userId)
-        .onSuccess { profile -> _state.value = State.Success(profile) }
-        .onFailure { error -> _state.value = State.Error(error.localizedMessage) }
+        .onSuccess { _state.value = State.Success(it) }
+        .onFailure { e ->
+            val message = when (e) {
+                is IOException   -> "Network error. Check your connection."
+                is HttpException -> "Server error (${e.code()})."
+                else             -> "Unexpected error."
+            }
+            _state.value = State.Error(message)
+        }
 }
-```
-
-### Extension Functions
-
-```kotlin
-fun String.isValidEmail(): Boolean =
-    android.util.Patterns.EMAIL_ADDRESS.matcher(this).matches()
-
-fun Int.dpToPx(context: Context): Int =
-    (this * context.resources.displayMetrics.density).toInt()
-
-// Usage
-if (email.isValidEmail()) { /* ... */ }
-val paddingPx = 16.dpToPx(context)
 ```
 
 ---
 
-## 4. Data Sources
+### Kotlin Scope Functions
 
-Data sources are the lowest layer in Clean Architecture. They are responsible for fetching or persisting raw data from a specific origin (network, database, preferences, cache).
+| Function | Context | Returns | Use when |
+|----------|---------|---------|----------|
+| `let` | `it` | Lambda result | Null-safe transformation |
+| `run` | `this` | Lambda result | Initialize + compute |
+| `with` | `this` | Lambda result | Multiple calls on same object |
+| `apply` | `this` | The object | Object configuration |
+| `also` | `it` | The object | Side effects (logging) |
+
+```kotlin
+// apply — configure an object
+val intent = Intent(context, UserDetailActivity::class.java).apply {
+    putExtra("userId", user.id)
+    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+}
+
+// let — null-safe transform
+val displayName = user?.name?.let { it.trim().uppercase() } ?: "UNKNOWN"
+
+// also — log without breaking the chain
+val user = userRepository.getUser(id)
+    .also { log.d("Fetched: $it") }
+
+// with — call multiple methods on the same object
+val summary = with(user) { "$name | $email | Joined: ${createdAt.format()}" }
+```
+
+---
+
+### Sealed Classes and When Expressions
+
+```kotlin
+sealed class AuthState {
+    object Unauthenticated                                    : AuthState()
+    object Authenticating                                     : AuthState()
+    data class Authenticated(val user: User, val token: String) : AuthState()
+    data class Error(val cause: Throwable)                    : AuthState()
+}
+
+// Compiler enforces exhaustive handling — no else needed
+fun handleAuthState(state: AuthState) = when (state) {
+    is AuthState.Unauthenticated  -> showLoginScreen()
+    is AuthState.Authenticating   -> showLoadingSpinner()
+    is AuthState.Authenticated    -> navigateToHome(state.user)
+    is AuthState.Error            -> showError(state.cause.message)
+}
+```
+
+---
+
+### Coroutines Best Practices
+
+```kotlin
+// Never use GlobalScope in production — use viewModelScope or lifecycleScope
+viewModelScope.launch { /* tied to ViewModel lifecycle */ }
+
+// Switch dispatchers explicitly with withContext
+suspend fun compressImage(bitmap: Bitmap): Bitmap = withContext(Dispatchers.Default) {
+    bitmap.compress()
+}
+
+// supervisorScope: independent children — one failure doesn't cancel siblings
+suspend fun loadDashboard(): Dashboard = supervisorScope {
+    val users  = async { userRepository.getUsers() }
+    val stats  = async { statsRepository.getStats() }
+    Dashboard(
+        users  = users.await().getOrDefault(emptyList()),
+        stats  = stats.await().getOrDefault(Stats.empty())
+    )
+}
+```
+
+---
+
+## 5. Data Sources
+
+### What are Data Sources?
+
+Data sources are the lowest layer in Clean Architecture. Each is responsible for accessing exactly one origin of data — a remote API, a local database, shared preferences, an in-memory cache, or the file system. They are the only layer that knows how data is stored or fetched.
+
+### Why Separate Data Sources?
+
+Without separation, the repository contains both network calls and database queries mixed together, making it impossible to test either in isolation. Splitting them means you can fake a remote data source in tests without touching the database, and vice versa.
+
+### When to Create a Data Source?
+
+Create one data source class per data origin. One for the API, one for Room, one for preferences. Never let a data source access two origins — that belongs in the repository.
 
 ### Types of Data Sources
 
-| Type   | Responsibility                      | Example                       |
-|--------|-------------------------------------|-------------------------------|
-| Remote | Fetch data from REST API / GraphQL  | Retrofit / OkHttp             |
-| Local  | Persist data in a local database    | Room                          |
-| Cache  | Fast in-memory or disk caching      | DataStore / SharedPreferences |
+| Type | Responsibility | Technology |
+|------|---------------|------------|
+| Remote | Fetch data from a server | Retrofit + OkHttp |
+| Local | Persist structured data on-device | Room (SQLite) |
+| Preferences | Store simple key-value settings | SharedPreferences / DataStore |
+| In-Memory Cache | Hold recently-accessed data in RAM | `LinkedHashMap`, `LruCache` |
+| File | Read/write files to disk | `File`, `ContentResolver` |
 
 ### Remote Data Source
 
 ```kotlin
-// Interface (domain/data boundary)
 interface UserRemoteDataSource {
     suspend fun fetchUser(id: String): UserDto
-    suspend fun fetchAllUsers(): List<UserDto>
+    suspend fun fetchAllUsers(page: Int, pageSize: Int): List<UserDto>
+    suspend fun createUser(dto: CreateUserDto): UserDto
+    suspend fun updateUser(id: String, dto: UpdateUserDto): UserDto
+    suspend fun deleteUser(id: String)
 }
 
-// Implementation
 class UserRemoteDataSourceImpl @Inject constructor(
     private val apiService: UserApiService
 ) : UserRemoteDataSource {
-
-    override suspend fun fetchUser(id: String): UserDto =
-        apiService.getUser(id)
-
-    override suspend fun fetchAllUsers(): List<UserDto> =
-        apiService.getAllUsers()
+    override suspend fun fetchUser(id: String)           = apiService.getUser(id)
+    override suspend fun fetchAllUsers(page: Int, pageSize: Int) = apiService.getAllUsers(page, pageSize)
+    override suspend fun createUser(dto: CreateUserDto)  = apiService.createUser(dto)
+    override suspend fun updateUser(id: String, dto: UpdateUserDto) = apiService.updateUser(id, dto)
+    override suspend fun deleteUser(id: String)          { apiService.deleteUser(id) }
 }
 ```
 
@@ -419,62 +774,99 @@ class UserRemoteDataSourceImpl @Inject constructor(
 ```kotlin
 interface UserLocalDataSource {
     suspend fun getUser(id: String): UserEntity?
+    suspend fun getAllUsers(): List<UserEntity>
     suspend fun saveUser(user: UserEntity)
+    suspend fun saveUsers(users: List<UserEntity>)
     suspend fun deleteUser(id: String)
+    suspend fun deleteAll()
     fun observeAllUsers(): Flow<List<UserEntity>>
+    fun observeUser(id: String): Flow<UserEntity?>
 }
 
 class UserLocalDataSourceImpl @Inject constructor(
     private val userDao: UserDao
 ) : UserLocalDataSource {
-
-    override suspend fun getUser(id: String): UserEntity? = userDao.findById(id)
-
-    override suspend fun saveUser(user: UserEntity) = userDao.upsert(user)
-
-    override suspend fun deleteUser(id: String) = userDao.deleteById(id)
-
-    override fun observeAllUsers(): Flow<List<UserEntity>> = userDao.observeAll()
+    override suspend fun getUser(id: String)              = userDao.findById(id)
+    override suspend fun getAllUsers()                     = userDao.getAll()
+    override suspend fun saveUser(user: UserEntity)       = userDao.upsert(user)
+    override suspend fun saveUsers(users: List<UserEntity>) = userDao.upsertAll(users)
+    override suspend fun deleteUser(id: String)           = userDao.deleteById(id)
+    override suspend fun deleteAll()                      = userDao.deleteAll()
+    override fun observeAllUsers()                        = userDao.observeAll()
+    override fun observeUser(id: String)                  = userDao.observeById(id)
 }
 ```
 
-### Data Transfer Objects (DTOs) vs Entities vs Domain Models
+### In-Memory Cache
 
 ```kotlin
-// DTO — raw API response shape
+class UserInMemoryCache @Inject constructor() {
+    private val cache = LinkedHashMap<String, Pair<User, Long>>()
+    private val ttlMs = 5 * 60 * 1_000L
+
+    fun get(id: String): User? {
+        val (user, timestamp) = cache[id] ?: return null
+        if (System.currentTimeMillis() - timestamp > ttlMs) { cache.remove(id); return null }
+        return user
+    }
+
+    fun put(user: User) {
+        if (cache.size >= 100) cache.remove(cache.keys.first())
+        cache[user.id] = user to System.currentTimeMillis()
+    }
+
+    fun invalidate(id: String) = cache.remove(id)
+    fun clear() = cache.clear()
+}
+```
+
+### DTOs vs Entities vs Domain Models
+
+```kotlin
+// DTO — shaped to match the API JSON. Uses serialization annotations. data/remote/dto/
+@Serializable
 data class UserDto(
-    @SerializedName("user_id") val userId: String,
-    @SerializedName("full_name") val fullName: String,
-    @SerializedName("email_address") val email: String
+    @SerialName("user_id")    val userId: String,
+    @SerialName("full_name")  val fullName: String,
+    @SerialName("email_address") val email: String,
+    @SerialName("avatar_url") val avatarUrl: String? = null
 )
 
-// Entity — Room database row
-@Entity(tableName = "users")
+// Entity — shaped to match the Room table. Uses Room annotations. data/local/entity/
+@Entity(tableName = "users", indices = [Index(value = ["email"], unique = true)])
 data class UserEntity(
     @PrimaryKey val id: String,
-    val name: String,
+    @ColumnInfo(name = "full_name")  val name: String,
     val email: String,
-    val cachedAt: Long = System.currentTimeMillis()
+    @ColumnInfo(name = "avatar_url") val avatarUrl: String?,
+    @ColumnInfo(name = "cached_at")  val cachedAt: Long = System.currentTimeMillis()
 )
 
-// Domain Model — pure Kotlin, no framework annotations
-data class User(
-    val id: String,
-    val name: String,
-    val email: String
-)
+// Domain model — pure Kotlin, zero annotations. domain/model/
+data class User(val id: String, val name: String, val email: String, val avatarUrl: String?)
 
-// Mappers
-fun UserDto.toDomain() = User(id = userId, name = fullName, email = email)
-fun UserEntity.toDomain() = User(id = id, name = name, email = email)
-fun User.toEntity() = UserEntity(id = id, name = name, email = email)
+// Mappers — data/mapper/
+fun UserDto.toDomain()    = User(userId, fullName, email, avatarUrl)
+fun UserDto.toEntity()    = UserEntity(userId, fullName, email, avatarUrl)
+fun UserEntity.toDomain() = User(id, name, email, avatarUrl)
+fun User.toEntity()       = UserEntity(id, name, email, avatarUrl)
 ```
 
 ---
 
-## 5. Repositories
+## 6. Repositories
 
-The Repository is the single source of truth for a given data domain. It abstracts the origin of data from the rest of the app. The domain layer defines the interface; the data layer provides the implementation.
+### What is a Repository?
+
+A repository is the single source of truth for a given data domain. It is the only component that knows where data comes from (network, database, cache) and decides which source to use at any given moment.
+
+### Why Use a Repository?
+
+Without a repository, every ViewModel or Use Case would need to know whether to call the network or the database, handle caching logic, and map between DTOs and domain models. This logic would be duplicated across the app. The repository centralises all of that in one place.
+
+### When to Create a Repository?
+
+Create one per major domain entity or aggregate root (e.g., `UserRepository`, `ProductRepository`, `OrderRepository`). Never span unrelated domains in one repository — that violates SRP.
 
 ### Repository Interface (Domain Layer)
 
@@ -482,75 +874,85 @@ The Repository is the single source of truth for a given data domain. It abstrac
 interface UserRepository {
     suspend fun getUser(id: String): Result<User>
     suspend fun saveUser(user: User): Result<Unit>
-    fun observeUsers(): Flow<List<User>>
+    suspend fun deleteUser(id: String): Result<Unit>
     suspend fun refreshUsers(): Result<Unit>
+    fun observeUsers(): Flow<List<User>>
+    fun observeUser(id: String): Flow<Result<User>>
 }
 ```
 
-### Repository Implementation (Data Layer)
+### Repository Implementation
 
 ```kotlin
 class UserRepositoryImpl @Inject constructor(
     private val remoteDataSource: UserRemoteDataSource,
     private val localDataSource: UserLocalDataSource,
+    private val inMemoryCache: UserInMemoryCache,
     private val networkMonitor: NetworkMonitor
 ) : UserRepository {
 
-    // Cache-first strategy: return local data, then refresh from network
     override suspend fun getUser(id: String): Result<User> = runCatching {
-        val cached = localDataSource.getUser(id)
-        if (cached != null) return@runCatching cached.toDomain()
+        inMemoryCache.get(id)?.let { return Result.success(it) }
 
-        val remote = remoteDataSource.fetchUser(id)
-        localDataSource.saveUser(remote.toEntity())
-        remote.toDomain()
+        val cached = localDataSource.getUser(id)
+        if (cached != null) {
+            inMemoryCache.put(cached.toDomain())
+            return Result.success(cached.toDomain())
+        }
+
+        val dto = remoteDataSource.fetchUser(id)
+        val user = dto.toDomain()
+        localDataSource.saveUser(dto.toEntity())
+        inMemoryCache.put(user)
+        user
     }
 
     override suspend fun saveUser(user: User): Result<Unit> = runCatching {
         localDataSource.saveUser(user.toEntity())
-        if (networkMonitor.isConnected) {
-            remoteDataSource.updateUser(user.toDto())
-        }
+        inMemoryCache.put(user)
+        if (networkMonitor.isConnected) remoteDataSource.updateUser(user.id, user.toUpdateDto())
     }
 
-    // Always observe from local DB (Room emits updates automatically)
-    override fun observeUsers(): Flow<List<User>> =
-        localDataSource.observeAllUsers().map { entities ->
-            entities.map { it.toDomain() }
-        }
-
-    // Explicit refresh from network → save to DB → Room Flow emits update
     override suspend fun refreshUsers(): Result<Unit> = runCatching {
-        val users = remoteDataSource.fetchAllUsers()
-        users.forEach { localDataSource.saveUser(it.toEntity()) }
+        val dtos = remoteDataSource.fetchAllUsers(page = 1, pageSize = 100)
+        localDataSource.saveUsers(dtos.map { it.toEntity() })
+        inMemoryCache.clear()
     }
+
+    override fun observeUsers(): Flow<List<User>> =
+        localDataSource.observeAllUsers().map { it.map(UserEntity::toDomain) }
+
+    override fun observeUser(id: String): Flow<Result<User>> =
+        localDataSource.observeUser(id).map { entity ->
+            entity?.let { Result.success(it.toDomain()) }
+                ?: Result.failure(NoSuchElementException("User $id not found"))
+        }
 }
 ```
 
-### Network-First vs Cache-First Strategies
+### Cache Strategies
 
 ```kotlin
-// Network-first (always try network, fall back to cache)
+// Network-first: best for frequently-changing data (prices, live scores)
 suspend fun getUserNetworkFirst(id: String): Result<User> = runCatching {
     try {
-        val remote = remoteDataSource.fetchUser(id)
-        localDataSource.saveUser(remote.toEntity())
-        remote.toDomain()
+        val dto = remoteDataSource.fetchUser(id)
+        localDataSource.saveUser(dto.toEntity())
+        dto.toDomain()
     } catch (e: IOException) {
         localDataSource.getUser(id)?.toDomain()
-            ?: throw NoSuchElementException("User $id not found in cache")
+            ?: throw NoSuchElementException("No cached data for user $id")
     }
 }
 
-// Cache-first (use cache, then refresh in background)
+// Cache-first: best for stable data (user profiles, product catalogs)
 fun getUserCacheFirst(id: String): Flow<Result<User>> = flow {
     val cached = localDataSource.getUser(id)
     if (cached != null) emit(Result.success(cached.toDomain()))
-
     try {
-        val remote = remoteDataSource.fetchUser(id)
-        localDataSource.saveUser(remote.toEntity())
-        emit(Result.success(remote.toDomain()))
+        val fresh = remoteDataSource.fetchUser(id)
+        localDataSource.saveUser(fresh.toEntity())
+        emit(Result.success(fresh.toDomain()))
     } catch (e: Exception) {
         if (cached == null) emit(Result.failure(e))
     }
@@ -559,146 +961,167 @@ fun getUserCacheFirst(id: String): Flow<Result<User>> = flow {
 
 ---
 
-## 6. Use Cases
+## 7. Use Cases
 
-A Use Case (also called Interactor) encapsulates a single business operation. It orchestrates data from one or more repositories and applies business rules. ViewModels depend on Use Cases, not repositories.
+### What is a Use Case?
+
+A use case (Interactor) encapsulates exactly one business operation. It orchestrates data from one or more repositories to fulfil a specific user intention: log in, place an order, follow another user.
 
 ### Why Use Cases?
 
-- Keeps ViewModels thin.
-- Business rules live in one place, not scattered across ViewModels.
-- Easy to unit-test in isolation.
-- Reusable across multiple ViewModels or platforms.
+Without use cases, business logic leaks into ViewModels. A ViewModel that calls three repositories, applies validation, and formats data is fragile, hard to test, and impossible to reuse. Use cases extract this logic into standalone, independently testable units.
 
-### Base Use Case Pattern
+### When to Create a Use Case?
+
+Create one whenever a discrete action requires logic beyond a single repository call. If the ViewModel just calls `repository.getUser(id)`, a use case is overkill. If it needs to validate, coordinate multiple repositories, or apply a business rule, extract a use case.
+
+### Base Abstractions
 
 ```kotlin
-// Suspending use case (one-shot)
-abstract class UseCase<in P, out R> {
-    suspend operator fun invoke(params: P): Result<R> = runCatching { execute(params) }
-    protected abstract suspend fun execute(params: P): R
+abstract class UseCase<in Params, out Result> {
+    suspend operator fun invoke(params: Params): kotlin.Result<Result> =
+        runCatching { execute(params) }
+    protected abstract suspend fun execute(params: Params): Result
 }
 
-// Flow use case (continuous observation)
-abstract class FlowUseCase<in P, out R> {
-    operator fun invoke(params: P): Flow<Result<R>> = execute(params)
-        .map { Result.success(it) }
-        .catch { emit(Result.failure(it)) }
-    protected abstract fun execute(params: P): Flow<R>
+abstract class FlowUseCase<in Params, out Result> {
+    operator fun invoke(params: Params): Flow<kotlin.Result<Result>> =
+        execute(params).map { kotlin.Result.success(it) }.catch { emit(kotlin.Result.failure(it)) }
+    protected abstract fun execute(params: Params): Flow<Result>
 }
 
-// No-param variant
-abstract class NoParamUseCase<out R> {
-    suspend operator fun invoke(): Result<R> = runCatching { execute() }
-    protected abstract suspend fun execute(): R
+abstract class NoParamsUseCase<out Result> {
+    suspend operator fun invoke(): kotlin.Result<Result> = runCatching { execute() }
+    protected abstract suspend fun execute(): Result
 }
 ```
 
-### Concrete Use Case Examples
+### Concrete Use Cases
 
 ```kotlin
-// Get user by ID
 class GetUserUseCase @Inject constructor(
     private val userRepository: UserRepository
 ) : UseCase<GetUserUseCase.Params, User>() {
-
     data class Params(val userId: String)
-
     override suspend fun execute(params: Params): User =
         userRepository.getUser(params.userId).getOrThrow()
 }
 
-// Login with validation
-class LoginUseCase @Inject constructor(
+class RegisterUserUseCase @Inject constructor(
+    private val userRepository: UserRepository,
     private val authRepository: AuthRepository,
-    private val sessionManager: SessionManager
-) : UseCase<LoginUseCase.Params, AuthToken>() {
+    private val emailValidator: EmailValidator
+) : UseCase<RegisterUserUseCase.Params, User>() {
 
-    data class Params(val email: String, val password: String)
+    data class Params(val name: String, val email: String, val password: String)
 
-    override suspend fun execute(params: Params): AuthToken {
-        require(params.email.isNotBlank()) { "Email cannot be blank" }
-        require(params.password.length >= 8) { "Password must be at least 8 characters" }
-
-        val token = authRepository.login(params.email, params.password).getOrThrow()
-        sessionManager.saveToken(token)
-        return token
+    override suspend fun execute(params: Params): User {
+        require(params.name.isNotBlank())                  { "Name is required" }
+        require(emailValidator.isValid(params.email))      { "Invalid email" }
+        require(params.password.length >= 8)               { "Password must be at least 8 characters" }
+        require(params.password.any { it.isUpperCase() })  { "Password must contain an uppercase letter" }
+        check(userRepository.findByEmail(params.email) == null) { "Email already registered" }
+        return authRepository.register(params.name, params.email, params.password)
     }
 }
 
-// Observe users as a stream
 class ObserveUsersUseCase @Inject constructor(
     private val userRepository: UserRepository
 ) : FlowUseCase<Unit, List<User>>() {
-
-    override fun execute(params: Unit): Flow<List<User>> =
-        userRepository.observeUsers()
+    override fun execute(params: Unit): Flow<List<User>> = userRepository.observeUsers()
 }
 ```
 
-### Usage in ViewModel
+### Composing Use Cases
 
 ```kotlin
-@HiltViewModel
-class UserListViewModel @Inject constructor(
-    private val observeUsersUseCase: ObserveUsersUseCase,
-    private val refreshUsersUseCase: RefreshUsersUseCase
-) : ViewModel() {
+class RefreshAndGetUserUseCase @Inject constructor(
+    private val refreshUsersUseCase: RefreshUsersUseCase,
+    private val getUserUseCase: GetUserUseCase
+) : UseCase<RefreshAndGetUserUseCase.Params, User>() {
+    data class Params(val userId: String)
+    override suspend fun execute(params: Params): User {
+        refreshUsersUseCase()
+        return getUserUseCase(GetUserUseCase.Params(params.userId)).getOrThrow()
+    }
+}
+```
 
-    val users: StateFlow<Result<List<User>>> = observeUsersUseCase(Unit)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Result.success(emptyList()))
+### Unit Testing Use Cases
 
-    fun refresh() {
-        viewModelScope.launch { refreshUsersUseCase() }
+```kotlin
+class RegisterUserUseCaseTest {
+    private val fakeUserRepo = FakeUserRepository()
+    private val fakeAuthRepo = FakeAuthRepository()
+    private val useCase = RegisterUserUseCase(fakeUserRepo, fakeAuthRepo, RealEmailValidator())
+
+    @Test fun `succeeds with valid input`() = runTest {
+        assertThat(useCase(RegisterUserUseCase.Params("Alice", "alice@example.com", "Password1")).isSuccess).isTrue()
+    }
+
+    @Test fun `fails when password is too short`() = runTest {
+        val result = useCase(RegisterUserUseCase.Params("Alice", "alice@example.com", "Pass1"))
+        assertThat(result.exceptionOrNull()?.message).contains("8 characters")
+    }
+
+    @Test fun `fails when email already registered`() = runTest {
+        fakeUserRepo.existingEmail = "alice@example.com"
+        val result = useCase(RegisterUserUseCase.Params("Alice", "alice@example.com", "Password1"))
+        assertThat(result.exceptionOrNull()?.message).contains("already registered")
     }
 }
 ```
 
 ---
 
-## 7. ViewModel
+## 8. ViewModel
 
-ViewModel is a Jetpack component that holds and manages UI-related data. It survives configuration changes (screen rotations) and is lifecycle-aware.
+### What is a ViewModel?
 
-### Key Responsibilities
+ViewModel is an Android Jetpack component that stores and manages UI-related data in a lifecycle-aware way. It survives configuration changes (screen rotations, theme changes) without losing state, and clears automatically when the associated screen is permanently destroyed.
 
-- Expose UI state via `StateFlow`.
-- React to user events via functions.
-- Launch coroutines in `viewModelScope`.
-- Never hold references to Context, Views, or Activities.
+### Why Use ViewModel?
+
+Without ViewModel, data fetched by an Activity is destroyed on every rotation, forcing redundant network calls. ViewModel solves this by living in a scope that outlasts the configuration change. Combined with `StateFlow`, it makes UI state observable, predictable, and fully testable on the JVM.
+
+### When to Use ViewModel?
+
+Every screen needs a ViewModel. For cross-screen shared state (shopping cart, session), use a ViewModel scoped to the Activity, or a shared repository injected into each ViewModel.
 
 ### UI State Design
 
-Model UI state as a sealed class to make all possible states explicit:
-
 ```kotlin
+// Sealed class for clear loading/success/error lifecycle
 sealed class UserDetailUiState {
-    object Idle : UserDetailUiState()
+    object Idle    : UserDetailUiState()
     object Loading : UserDetailUiState()
     data class Success(val user: User) : UserDetailUiState()
-    data class Error(val message: String, val retryable: Boolean) : UserDetailUiState()
+    data class Error(val message: String, val isRetryable: Boolean) : UserDetailUiState()
+}
+
+// Data class for complex screens with multiple independent sections
+data class DashboardUiState(
+    val profile:      AsyncData<UserProfile>    = AsyncData.Loading,
+    val feed:         AsyncData<List<Post>>     = AsyncData.Loading,
+    val isRefreshing: Boolean                   = false
+)
+
+sealed class AsyncData<out T> {
+    object Loading                        : AsyncData<Nothing>()
+    data class Success<T>(val data: T)    : AsyncData<T>()
+    data class Error(val message: String) : AsyncData<Nothing>()
 }
 ```
 
-For complex screens, use a single data class state:
-
-```kotlin
-data class UserListUiState(
-    val users: List<User> = emptyList(),
-    val isLoading: Boolean = false,
-    val error: String? = null,
-    val isRefreshing: Boolean = false
-)
-```
-
-### Full ViewModel Example
+### Full ViewModel with Events
 
 ```kotlin
 @HiltViewModel
 class UserDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val getUserUseCase: GetUserUseCase,
-    private val updateUserUseCase: UpdateUserUseCase
+    private val updateUserUseCase: UpdateUserUseCase,
+    private val deleteUserUseCase: DeleteUserUseCase
 ) : ViewModel() {
 
     private val userId: String = checkNotNull(savedStateHandle["userId"])
@@ -706,34 +1129,31 @@ class UserDetailViewModel @Inject constructor(
     private val _uiState = MutableStateFlow<UserDetailUiState>(UserDetailUiState.Idle)
     val uiState: StateFlow<UserDetailUiState> = _uiState.asStateFlow()
 
-    // One-shot events (navigation, snackbars) use SharedFlow
-    private val _events = MutableSharedFlow<UserDetailEvent>()
+    private val _events = MutableSharedFlow<UserDetailEvent>(extraBufferCapacity = 1)
     val events: SharedFlow<UserDetailEvent> = _events.asSharedFlow()
 
-    init {
-        loadUser()
-    }
+    init { loadUser() }
 
     fun loadUser() {
         viewModelScope.launch {
             _uiState.value = UserDetailUiState.Loading
             getUserUseCase(GetUserUseCase.Params(userId))
-                .onSuccess { user -> _uiState.value = UserDetailUiState.Success(user) }
+                .onSuccess { _uiState.value = UserDetailUiState.Success(it) }
                 .onFailure { e ->
                     _uiState.value = UserDetailUiState.Error(
-                        message = e.localizedMessage ?: "An error occurred",
-                        retryable = e is IOException
+                        message      = e.localizedMessage ?: "Unknown error",
+                        isRetryable  = e is IOException
                     )
                 }
         }
     }
 
-    fun updateUserName(newName: String) {
-        val current = (_uiState.value as? UserDetailUiState.Success)?.user ?: return
+    fun updateName(newName: String) {
+        val user = (_uiState.value as? UserDetailUiState.Success)?.user ?: return
         viewModelScope.launch {
-            updateUserUseCase(UpdateUserUseCase.Params(current.copy(name = newName)))
-                .onSuccess { _events.emit(UserDetailEvent.ShowSnackbar("Name updated")) }
-                .onFailure { _events.emit(UserDetailEvent.ShowSnackbar("Update failed")) }
+            updateUserUseCase(UpdateUserUseCase.Params(user.copy(name = newName)))
+                .onSuccess { _events.tryEmit(UserDetailEvent.ShowSnackbar("Name updated")) }
+                .onFailure { _events.tryEmit(UserDetailEvent.ShowSnackbar("Update failed")) }
         }
     }
 }
@@ -744,56 +1164,74 @@ sealed class UserDetailEvent {
 }
 ```
 
-### SavedStateHandle
-
-Use `SavedStateHandle` for navigation arguments and state that must survive process death:
+### Debouncing User Input
 
 ```kotlin
 @HiltViewModel
 class SearchViewModel @Inject constructor(
-    private val savedStateHandle: SavedStateHandle,
     private val searchUseCase: SearchUsersUseCase
 ) : ViewModel() {
 
-    var searchQuery by savedStateHandle.saveable { mutableStateOf("") }
-        private set
+    private val _query = MutableStateFlow("")
+    val query: StateFlow<String> = _query.asStateFlow()
 
-    fun onQueryChanged(query: String) {
-        searchQuery = query
-    }
+    val results: StateFlow<List<User>> = _query
+        .debounce(300)
+        .filter { it.length >= 2 }
+        .distinctUntilChanged()
+        .flatMapLatest { q -> searchUseCase(SearchUsersUseCase.Params(q)).catch { emit(emptyList()) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun onQueryChanged(query: String) { _query.value = query }
 }
 ```
 
-### Sharing State Between ViewModels
-
-For shared state, use an `activityViewModels()` scoped ViewModel or inject a shared repository:
+### Combining Multiple Flows
 
 ```kotlin
-// Shared ViewModel scoped to Activity
-@HiltViewModel
-class SharedCartViewModel @Inject constructor(
-    private val cartRepository: CartRepository
-) : ViewModel() {
-    val cartItems: StateFlow<List<CartItem>> = cartRepository.observeCart()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-}
+val uiState: StateFlow<DashboardUiState> = combine(
+    observeUserUseCase(Unit),
+    observeNotificationsUseCase(Unit)
+) { userResult, notificationsResult ->
+    DashboardUiState(
+        user          = userResult.getOrNull(),
+        notifications = notificationsResult.getOrDefault(emptyList()),
+        hasError      = userResult.isFailure
+    )
+}.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DashboardUiState())
 ```
 
 ---
 
-## 8. Jetpack Compose
+## 9. Jetpack Compose
 
-Jetpack Compose is Android's modern declarative UI toolkit. Instead of manipulating XML views, you describe what the UI should look like given a state, and Compose handles recomposition.
+### What is Jetpack Compose?
+
+Jetpack Compose is Android's modern, fully declarative UI toolkit. Instead of defining views in XML and imperatively mutating them (`textView.text = "Hello"`), you write Composable functions that *describe* what the UI should look like for a given state. When state changes, Compose automatically re-renders only the affected composables.
+
+### Why Use Compose?
+
+- **Less code:** No XML, no `findViewById`, no view binding boilerplate.
+- **Reactive by default:** UI automatically updates when state changes.
+- **Kotlin-first:** Full language features available directly in UI code.
+- **Powerful previews:** Render composables in Android Studio without running the app.
+- **Better testing:** Composables are functions that compose and test cleanly.
+
+### When to Use Compose?
+
+For all new Android UI development. Google has recommended Compose as the default UI framework since 2022. For legacy projects, Compose interoperates with XML views through `ComposeView` and `AndroidView`.
 
 ### Core Concepts
 
-| Concept          | Description                                                                       |
-|------------------|-----------------------------------------------------------------------------------|
-| Composable       | A function annotated with `@Composable` that emits UI                             |
-| State            | Data that drives the UI. When state changes, Compose recomposes affected composables |
-| Recomposition    | Compose re-runs only the composables that read changed state                      |
-| Side Effects     | Operations that escape the Compose tree (`LaunchedEffect`, `SideEffect`, `DisposableEffect`) |
-| Hoisting         | Moving state up to the caller so composables are stateless and testable           |
+| Concept | Description |
+|---------|-------------|
+| `@Composable` | Marks a UI-emitting function |
+| State | Data that drives UI; changes trigger recomposition |
+| Recomposition | Compose re-runs composables that read changed state |
+| State hoisting | Moving state up so children are stateless and reusable |
+| `remember` | Memoizes across recompositions (not configuration changes) |
+| `rememberSaveable` | Memoizes across recompositions AND configuration changes |
+| Side effects | `LaunchedEffect`, `DisposableEffect`, `SideEffect` |
 
 ### Composable Functions
 
@@ -808,23 +1246,27 @@ fun UserCard(
         modifier = modifier
             .fillMaxWidth()
             .clickable { onUserClick(user.id) },
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
             modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             AsyncImage(
                 model = user.avatarUrl,
                 contentDescription = "Avatar of ${user.name}",
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(48.dp).clip(CircleShape)
             )
-            Spacer(modifier = Modifier.width(12.dp))
-            Column {
-                Text(text = user.name, style = MaterialTheme.typography.titleMedium)
-                Text(text = user.email, style = MaterialTheme.typography.bodySmall)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(text = user.name,  style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text  = user.email,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -834,54 +1276,25 @@ fun UserCard(
 ### State Hoisting
 
 ```kotlin
-// Stateful (owns state — use at top level)
+// Stateful parent — owns state, talks to ViewModel
 @Composable
 fun SearchScreen(viewModel: SearchViewModel = hiltViewModel()) {
-    val query by viewModel.searchQuery
-    SearchBar(
-        query = query,
-        onQueryChanged = viewModel::onQueryChanged
-    )
+    val query   by viewModel.query.collectAsStateWithLifecycle()
+    val results by viewModel.results.collectAsStateWithLifecycle()
+    SearchContent(query, results, viewModel::onQueryChanged)
 }
 
-// Stateless (receives state — easy to test and reuse)
+// Stateless child — pure function of its inputs, easy to test and preview
 @Composable
-fun SearchBar(
+fun SearchContent(
     query: String,
+    results: List<User>,
     onQueryChanged: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    OutlinedTextField(
-        value = query,
-        onValueChange = onQueryChanged,
-        placeholder = { Text("Search users...") },
-        modifier = modifier.fillMaxWidth()
-    )
-}
-```
-
-### Collecting ViewModel State
-
-```kotlin
-@Composable
-fun UserListScreen(viewModel: UserListViewModel = hiltViewModel()) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-
-    val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
-        viewModel.events
-            .flowWithLifecycle(lifecycleOwner.lifecycle)
-            .collect { event ->
-                when (event) {
-                    is UserListEvent.ShowSnackbar -> { /* show snackbar */ }
-                }
-            }
-    }
-
-    when (val state = uiState) {
-        is UserListUiState.Loading -> LoadingScreen()
-        is UserListUiState.Success -> UserList(users = state.users, onUserClick = { /* navigate */ })
-        is UserListUiState.Error   -> ErrorScreen(message = state.message, onRetry = viewModel::refresh)
+    Column(modifier) {
+        OutlinedTextField(value = query, onValueChange = onQueryChanged, modifier = Modifier.fillMaxWidth())
+        LazyColumn { items(results, key = { it.id }) { UserCard(it, onUserClick = {}) } }
     }
 }
 ```
@@ -889,12 +1302,10 @@ fun UserListScreen(viewModel: UserListViewModel = hiltViewModel()) {
 ### Side Effects
 
 ```kotlin
-// LaunchedEffect — run suspend code when key changes
-LaunchedEffect(userId) {
-    viewModel.loadUser(userId)
-}
+// LaunchedEffect — runs a suspend block; cancelled and re-launched when the key changes
+LaunchedEffect(userId) { viewModel.loadUser(userId) }
 
-// DisposableEffect — cleanup on leave
+// DisposableEffect — setup and teardown tied to composition lifetime
 DisposableEffect(lifecycleOwner) {
     val observer = LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_RESUME) viewModel.onResume()
@@ -903,29 +1314,72 @@ DisposableEffect(lifecycleOwner) {
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
 }
 
-// SideEffect — run on every successful recomposition
-SideEffect {
-    systemUiController.setStatusBarColor(MaterialTheme.colorScheme.primary)
+// SideEffect — runs on every successful recomposition (sync Compose → non-Compose)
+SideEffect { systemUiController.setStatusBarColor(MaterialTheme.colorScheme.primary) }
+```
+
+### Material 3 Theming
+
+```kotlin
+private val LightColorScheme = lightColorScheme(
+    primary    = Color(0xFF6650A4),
+    onPrimary  = Color(0xFFFFFFFF),
+    background = Color(0xFFFFFBFE),
+    surface    = Color(0xFFFFFBFE)
+)
+
+@Composable
+fun AppTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = if (darkTheme) darkColorScheme() else LightColorScheme,
+        typography  = AppTypography,
+        content     = content
+    )
 }
 ```
 
-### Navigation with Compose
+### Animations
 
 ```kotlin
+// Animated visibility
+AnimatedVisibility(visible = isLoading, enter = fadeIn(), exit = fadeOut()) {
+    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+}
+
+// Animated value
+val alpha by animateFloatAsState(targetValue = if (isEnabled) 1f else 0.38f, label = "alpha")
+
+// Crossfade between states
+Crossfade(targetState = uiState, label = "screen") { state ->
+    when (state) {
+        is Loading -> LoadingScreen()
+        is Success -> ContentScreen(state.data)
+        is Error   -> ErrorScreen(state.message)
+    }
+}
+```
+
+### Navigation
+
+```kotlin
+sealed class AppRoute(val path: String) {
+    object UserList   : AppRoute("user_list")
+    object UserDetail : AppRoute("user_detail/{userId}") {
+        fun buildRoute(id: String) = "user_detail/$id"
+    }
+}
+
 @Composable
 fun AppNavHost(navController: NavHostController = rememberNavController()) {
-    NavHost(navController = navController, startDestination = "user_list") {
-        composable("user_list") {
-            UserListScreen(onNavigateToDetail = { id ->
-                navController.navigate("user_detail/$id")
-            })
+    NavHost(navController, startDestination = AppRoute.UserList.path) {
+        composable(AppRoute.UserList.path) {
+            UserListScreen(onNavigateToDetail = { navController.navigate(AppRoute.UserDetail.buildRoute(it)) })
         }
         composable(
-            route = "user_detail/{userId}",
+            route = AppRoute.UserDetail.path,
             arguments = listOf(navArgument("userId") { type = NavType.StringType })
-        ) { backStackEntry ->
-            val userId = backStackEntry.arguments?.getString("userId") ?: return@composable
-            UserDetailScreen(userId = userId, onNavigateBack = navController::popBackStack)
+        ) {
+            UserDetailScreen(onNavigateBack = navController::popBackStack)
         }
     }
 }
@@ -934,41 +1388,60 @@ fun AppNavHost(navController: NavHostController = rememberNavController()) {
 ### Performance Best Practices
 
 ```kotlin
-// Use `key` to help Compose identify list items
 LazyColumn {
-    items(users, key = { it.id }) { user ->
-        UserCard(user = user, onUserClick = onUserClick)
-    }
+    items(users, key = { it.id }) { user -> UserCard(user, onUserClick) }
 }
 
-// Use `remember` to avoid recomputation on every recomposition
 val sortedUsers = remember(users) { users.sortedBy { it.name } }
+val showScrollToTop by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 } }
 
-// Use `derivedStateOf` for state that derives from other state
-val hasUsers by remember { derivedStateOf { users.isNotEmpty() } }
+@Immutable data class UserCardModel(val id: String, val name: String)
+```
 
-// Avoid creating lambdas on every recomposition — hoist or `remember` them
-val onUserClick = remember<(String) -> Unit>(navController) {
-    { userId -> navController.navigate("user_detail/$userId") }
+### Compose Testing
+
+```kotlin
+@get:Rule val composeRule = createComposeRule()
+
+@Test fun `UserCard displays name and email`() {
+    val user = User("1", "Alice", "alice@example.com", null)
+    composeRule.setContent { AppTheme { UserCard(user, onUserClick = {}) } }
+    composeRule.onNodeWithText("Alice").assertIsDisplayed()
+    composeRule.onNodeWithText("alice@example.com").assertIsDisplayed()
+}
+
+@Test fun `clicking UserCard invokes onUserClick`() {
+    var clicked = ""
+    val user = User("1", "Alice", "alice@example.com", null)
+    composeRule.setContent { AppTheme { UserCard(user, onUserClick = { clicked = it }) } }
+    composeRule.onNodeWithText("Alice").performClick()
+    assertThat(clicked).isEqualTo("1")
 }
 ```
 
 ---
 
-## 9. Network Operations with OkHttp
+## 10. Network Operations with OkHttp
 
-OkHttp is the HTTP client that powers Retrofit. Understanding OkHttp directly lets you configure interceptors, timeouts, caching, logging, and authentication.
+### What is OkHttp?
+
+OkHttp is an efficient, open-source HTTP client for Android and Java developed by Square. It handles connection pooling, transparent GZIP, HTTP/2, response caching, and retry logic out of the box. Retrofit uses OkHttp as its transport layer.
+
+### Why OkHttp?
+
+OkHttp gives you fine-grained control over the HTTP stack through its interceptor chain — a composable pipeline where each interceptor can inspect, modify, retry, or short-circuit requests and responses. Cross-cutting concerns like authentication, caching, and logging are trivially pluggable.
+
+### When to Configure OkHttp?
+
+Always, even when using Retrofit. Configure authentication headers, timeouts, logging, and caching at the OkHttp level so all Retrofit services share the same configuration automatically.
 
 ### Gradle Dependencies
 
 ```kotlin
-// build.gradle.kts
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
-    implementation("com.squareup.retrofit2:converter-gson:2.11.0")
-    // OR kotlinx.serialization
     implementation("com.jakewharton.retrofit:retrofit2-kotlinx-serialization-converter:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 }
@@ -977,33 +1450,25 @@ dependencies {
 ### OkHttp Client Configuration
 
 ```kotlin
-object NetworkModule {
-
-    fun provideOkHttpClient(
-        authInterceptor: AuthInterceptor,
-        @ApplicationContext context: Context
-    ): OkHttpClient {
-        val cacheSize = 10L * 1024 * 1024 // 10 MB
-        val cache = Cache(context.cacheDir, cacheSize)
-
-        return OkHttpClient.Builder()
-            .cache(cache)
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .addInterceptor(authInterceptor)
-            .addInterceptor(CacheInterceptor())
-            .addInterceptor(
-                HttpLoggingInterceptor().apply {
-                    level = if (BuildConfig.DEBUG)
-                        HttpLoggingInterceptor.Level.BODY
-                    else
-                        HttpLoggingInterceptor.Level.NONE
-                }
-            )
-            .build()
-    }
-}
+@Provides @Singleton
+fun provideOkHttpClient(
+    authInterceptor: AuthInterceptor,
+    @ApplicationContext context: Context
+): OkHttpClient = OkHttpClient.Builder()
+    .cache(Cache(context.cacheDir.resolve("http_cache"), 10L * 1024 * 1024))
+    .connectTimeout(30, TimeUnit.SECONDS)
+    .readTimeout(30, TimeUnit.SECONDS)
+    .writeTimeout(30, TimeUnit.SECONDS)
+    .retryOnConnectionFailure(true)
+    .addInterceptor(authInterceptor)
+    .addInterceptor(CacheInterceptor())
+    .addNetworkInterceptor(
+        HttpLoggingInterceptor().apply {
+            level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BODY
+                    else HttpLoggingInterceptor.Level.NONE
+        }
+    )
+    .build()
 ```
 
 ### Authentication Interceptor
@@ -1012,21 +1477,40 @@ object NetworkModule {
 class AuthInterceptor @Inject constructor(
     private val sessionManager: SessionManager
 ) : Interceptor {
-
     override fun intercept(chain: Interceptor.Chain): Response {
         val token = sessionManager.getToken()
         val request = chain.request().newBuilder()
-            .header("Authorization", "Bearer $token")
+            .apply { if (token != null) header("Authorization", "Bearer $token") }
             .header("Accept", "application/json")
+            .header("X-App-Version", BuildConfig.VERSION_NAME)
             .build()
-
         val response = chain.proceed(request)
-
-        if (response.code == 401) {
-            sessionManager.clearSession()
-        }
-
+        if (response.code == 401) sessionManager.clearSession()
         return response
+    }
+}
+```
+
+### Automatic Token Refresh (Authenticator)
+
+```kotlin
+class TokenRefreshAuthenticator @Inject constructor(
+    private val sessionManager: SessionManager,
+    private val authApiService: AuthApiService
+) : Authenticator {
+    override fun authenticate(route: Route?, response: Response): Request? {
+        if (response.request.header("X-Retry-After-Refresh") != null) return null
+        synchronized(this) {
+            val refreshToken = sessionManager.getRefreshToken() ?: return null
+            val newToken = runBlocking {
+                runCatching { authApiService.refresh(RefreshRequest(refreshToken)) }.getOrNull()
+            } ?: run { sessionManager.clearSession(); return null }
+            sessionManager.saveSession(newToken)
+            return response.request.newBuilder()
+                .header("Authorization", "Bearer ${newToken.accessToken}")
+                .header("X-Retry-After-Refresh", "true")
+                .build()
+        }
     }
 }
 ```
@@ -1037,121 +1521,119 @@ class AuthInterceptor @Inject constructor(
 class CacheInterceptor : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val response = chain.proceed(chain.request())
-        val cacheControl = CacheControl.Builder()
-            .maxAge(5, TimeUnit.MINUTES)
-            .build()
         return response.newBuilder()
             .removeHeader("Pragma")
             .removeHeader("Cache-Control")
-            .header("Cache-Control", cacheControl.toString())
+            .header("Cache-Control", CacheControl.Builder().maxAge(5, TimeUnit.MINUTES).build().toString())
             .build()
     }
 }
+```
+
+### Certificate Pinning
+
+```kotlin
+val certificatePinner = CertificatePinner.Builder()
+    .add("api.example.com", "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    .add("api.example.com", "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=") // backup
+    .build()
+
+OkHttpClient.Builder().certificatePinner(certificatePinner).build()
 ```
 
 ### Retrofit API Service
 
 ```kotlin
 interface UserApiService {
-    @GET("users/{id}")
-    suspend fun getUser(@Path("id") id: String): UserDto
-
-    @GET("users")
-    suspend fun getAllUsers(
-        @Query("page") page: Int = 1,
-        @Query("per_page") perPage: Int = 20
-    ): PagedResponse<UserDto>
-
-    @POST("users")
-    suspend fun createUser(@Body request: CreateUserRequest): UserDto
-
-    @PUT("users/{id}")
-    suspend fun updateUser(
-        @Path("id") id: String,
-        @Body request: UpdateUserRequest
-    ): UserDto
-
-    @DELETE("users/{id}")
-    suspend fun deleteUser(@Path("id") id: String): Response<Unit>
-
-    @Multipart
-    @POST("users/{id}/avatar")
-    suspend fun uploadAvatar(
-        @Path("id") id: String,
-        @Part avatar: MultipartBody.Part
-    ): UserDto
+    @GET("users/{id}") suspend fun getUser(@Path("id") id: String): UserDto
+    @GET("users") suspend fun getAllUsers(@Query("page") page: Int, @Query("per_page") perPage: Int): List<UserDto>
+    @POST("users") suspend fun createUser(@Body request: CreateUserRequest): UserDto
+    @PUT("users/{id}") suspend fun updateUser(@Path("id") id: String, @Body request: UpdateUserRequest): UserDto
+    @DELETE("users/{id}") suspend fun deleteUser(@Path("id") id: String): Response<Unit>
+    @Multipart @POST("users/{id}/avatar")
+    suspend fun uploadAvatar(@Path("id") id: String, @Part avatar: MultipartBody.Part): UserDto
 }
 ```
 
 ### Retrofit Instance
 
 ```kotlin
-fun provideRetrofit(okHttpClient: OkHttpClient): Retrofit =
-    Retrofit.Builder()
-        .baseUrl("https://api.example.com/v1/")
-        .client(okHttpClient)
-        .addConverterFactory(
-            Json { ignoreUnknownKeys = true }
-                .asConverterFactory("application/json".toMediaType())
-        )
-        .build()
+@Provides @Singleton
+fun provideRetrofit(okHttpClient: OkHttpClient): Retrofit = Retrofit.Builder()
+    .baseUrl("https://api.example.com/v1/")
+    .client(okHttpClient)
+    .addConverterFactory(
+        Json { ignoreUnknownKeys = true }.asConverterFactory("application/json".toMediaType())
+    )
+    .build()
 ```
 
-### Error Handling
+### Structured Error Handling
 
 ```kotlin
-sealed class NetworkResult<out T> {
-    data class Success<T>(val data: T) : NetworkResult<T>()
-    data class Error(val code: Int, val message: String) : NetworkResult<Nothing>()
-    object NetworkError : NetworkResult<Nothing>()
-    object Loading : NetworkResult<Nothing>()
+sealed class ApiError : Exception() {
+    data class HttpError(val code: Int, val body: String?) : ApiError()
+    data class NetworkError(override val cause: Throwable) : ApiError()
+    data class SerializationError(override val cause: Throwable) : ApiError()
+    object UnknownError : ApiError()
 }
 
-suspend fun <T> safeApiCall(apiCall: suspend () -> T): NetworkResult<T> = try {
-    NetworkResult.Success(apiCall())
-} catch (e: HttpException) {
-    val errorBody = e.response()?.errorBody()?.string()
-    NetworkResult.Error(e.code(), errorBody ?: e.message())
-} catch (e: IOException) {
-    NetworkResult.NetworkError
-}
-
-// Usage in data source
-override suspend fun fetchUser(id: String): NetworkResult<UserDto> =
-    safeApiCall { apiService.getUser(id) }
+suspend fun <T> safeApiCall(call: suspend () -> T): Result<T> =
+    runCatching { call() }.fold(
+        onSuccess = { Result.success(it) },
+        onFailure = { e ->
+            Result.failure(when (e) {
+                is HttpException     -> ApiError.HttpError(e.code(), e.response()?.errorBody()?.string())
+                is IOException       -> ApiError.NetworkError(e)
+                is JsonDataException -> ApiError.SerializationError(e)
+                else                 -> ApiError.UnknownError
+            })
+        }
+    )
 ```
 
-### Paging with OkHttp
+### Paging 3 Integration
 
 ```kotlin
 class UserPagingSource @Inject constructor(
     private val apiService: UserApiService
 ) : PagingSource<Int, UserDto>() {
 
+    override fun getRefreshKey(state: PagingState<Int, UserDto>): Int? =
+        state.anchorPosition?.let { anchor ->
+            state.closestPageToPosition(anchor)?.prevKey?.plus(1)
+                ?: state.closestPageToPosition(anchor)?.nextKey?.minus(1)
+        }
+
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, UserDto> {
         val page = params.key ?: 1
         return try {
-            val response = apiService.getAllUsers(page = page, perPage = params.loadSize)
-            LoadResult.Page(
-                data = response.data,
-                prevKey = if (page == 1) null else page - 1,
-                nextKey = if (response.data.isEmpty()) null else page + 1
-            )
-        } catch (e: Exception) {
-            LoadResult.Error(e)
-        }
+            val items = apiService.getAllUsers(page = page, perPage = params.loadSize)
+            LoadResult.Page(items, prevKey = if (page == 1) null else page - 1, nextKey = if (items.isEmpty()) null else page + 1)
+        } catch (e: Exception) { LoadResult.Error(e) }
     }
-
-    override fun getRefreshKey(state: PagingState<Int, UserDto>): Int? =
-        state.anchorPosition?.let { state.closestPageToPosition(it)?.prevKey?.plus(1) }
 }
 ```
 
 ---
 
-## 10. Dependency Injection with Hilt
+## 11. Dependency Injection with Hilt
 
-Hilt is Google's recommended DI framework for Android, built on top of Dagger 2. It reduces boilerplate and integrates with Jetpack components.
+### What is Hilt?
+
+Hilt is Google's recommended dependency injection (DI) framework for Android, built on top of Dagger 2. Dependency injection is a pattern where objects receive their dependencies from the outside rather than creating them internally. Hilt automates the wiring of these dependencies using annotations and code generation, eliminating the boilerplate of manual Dagger setup.
+
+### Why Use Hilt?
+
+Without DI, classes create their own dependencies (`val repo = UserRepositoryImpl()`), making them impossible to swap in tests. With Hilt:
+- Dependencies are declared via constructor injection — classes are oblivious to how they are created.
+- The dependency graph is verified at **compile time** — no runtime crashes from missing bindings.
+- Swapping a real implementation for a fake in tests requires only one annotation.
+- Android Jetpack components (ViewModel, Worker, Activity) are supported first-class.
+
+### When to Use Hilt?
+
+In every Android app that has more than one class. If a class has dependencies, inject them. Never let classes `new` up their own dependencies; that defeats testability and makes swapping implementations for different environments (debug, staging, production) painful.
 
 ### Gradle Setup
 
@@ -1163,6 +1645,8 @@ plugins {
 
 // app-level build.gradle.kts
 plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
     id("com.google.dagger.hilt.android")
     id("kotlin-kapt")
 }
@@ -1171,94 +1655,85 @@ dependencies {
     implementation("com.google.dagger:hilt-android:2.51.1")
     kapt("com.google.dagger:hilt-android-compiler:2.51.1")
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    // For WorkManager integration
+    implementation("androidx.hilt:hilt-work:1.2.0")
+    kapt("androidx.hilt:hilt-compiler:1.2.0")
 }
 
-kapt {
-    correctErrorTypes = true
-}
+kapt { correctErrorTypes = true }
 ```
 
 ### Application Class
 
 ```kotlin
 @HiltAndroidApp
-class MyApplication : Application()
+class MyApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        // Hilt initialises the component graph here
+    }
+}
 ```
 
-### Hilt Modules
+### Hilt Modules — `@Provides` vs `@Binds`
+
+Use `@Provides` for types you don't own (third-party classes like `Retrofit`, `OkHttpClient`, `Room`) and `@Binds` to map an interface to its implementation (always prefer `@Binds` — it generates less code):
 
 ```kotlin
 @Module
 @InstallIn(SingletonComponent::class)
 object NetworkModule {
 
-    @Provides
-    @Singleton
+    @Provides @Singleton
     fun provideOkHttpClient(authInterceptor: AuthInterceptor): OkHttpClient =
-        OkHttpClient.Builder()
-            .addInterceptor(authInterceptor)
-            .build()
+        OkHttpClient.Builder().addInterceptor(authInterceptor).build()
 
-    @Provides
-    @Singleton
-    fun provideRetrofit(okHttpClient: OkHttpClient): Retrofit =
-        Retrofit.Builder()
-            .baseUrl("https://api.example.com/v1/")
-            .client(okHttpClient)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
+    @Provides @Singleton
+    fun provideRetrofit(client: OkHttpClient): Retrofit = Retrofit.Builder()
+        .baseUrl("https://api.example.com/v1/")
+        .client(client)
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
 
-    @Provides
-    @Singleton
+    @Provides @Singleton
     fun provideUserApiService(retrofit: Retrofit): UserApiService =
         retrofit.create(UserApiService::class.java)
 }
 
+// Use abstract class + @Binds for interface-to-implementation binding
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class RepositoryModule {
-
-    @Binds
-    @Singleton
-    abstract fun bindUserRepository(impl: UserRepositoryImpl): UserRepository
-
-    @Binds
-    @Singleton
-    abstract fun bindAuthRepository(impl: AuthRepositoryImpl): AuthRepository
+    @Binds @Singleton abstract fun bindUserRepository(impl: UserRepositoryImpl): UserRepository
+    @Binds @Singleton abstract fun bindAuthRepository(impl: AuthRepositoryImpl): AuthRepository
 }
 
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class DataSourceModule {
-
-    @Binds
-    @Singleton
-    abstract fun bindUserRemoteDataSource(impl: UserRemoteDataSourceImpl): UserRemoteDataSource
-
-    @Binds
-    @Singleton
-    abstract fun bindUserLocalDataSource(impl: UserLocalDataSourceImpl): UserLocalDataSource
+    @Binds @Singleton abstract fun bindUserRemoteDataSource(impl: UserRemoteDataSourceImpl): UserRemoteDataSource
+    @Binds @Singleton abstract fun bindUserLocalDataSource(impl: UserLocalDataSourceImpl): UserLocalDataSource
 }
 ```
 
 ### Hilt Scopes
 
-| Scope                    | Component                  | Lifetime                     |
-|--------------------------|----------------------------|------------------------------|
-| `@Singleton`             | `SingletonComponent`       | App lifetime                 |
-| `@ActivityRetainedScoped`| `ActivityRetainedComponent`| Survives config changes      |
-| `@ActivityScoped`        | `ActivityComponent`        | Activity lifetime            |
-| `@ViewModelScoped`       | `ViewModelComponent`       | ViewModel lifetime           |
-| `@FragmentScoped`        | `FragmentComponent`        | Fragment lifetime            |
+Scopes control how long a provided instance lives. Always use the narrowest scope that satisfies your requirements.
+
+| Scope | Component | Lifetime | Use for |
+|-------|-----------|----------|---------|
+| `@Singleton` | `SingletonComponent` | App lifetime | Network, DB, repositories |
+| `@ActivityRetainedScoped` | `ActivityRetainedComponent` | Survives config changes | Shared state across fragments |
+| `@ActivityScoped` | `ActivityComponent` | Activity lifetime | Activity-local helpers |
+| `@ViewModelScoped` | `ViewModelComponent` | ViewModel lifetime | Use case instances scoped to one VM |
+| `@FragmentScoped` | `FragmentComponent` | Fragment lifetime | Fragment-local helpers |
 
 ```kotlin
 @Module
 @InstallIn(ViewModelComponent::class)
 object ViewModelModule {
-
-    @Provides
-    @ViewModelScoped
-    fun provideSomeViewModelScopedDependency(): SomeDependency = SomeDependency()
+    @Provides @ViewModelScoped
+    fun provideAnalyticsTracker(): AnalyticsTracker = AnalyticsTracker()
 }
 ```
 
@@ -1272,49 +1747,116 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { AppNavHost() }
+        setContent { AppTheme { AppNavHost() } }
     }
 }
 
-// ViewModel (via @HiltViewModel)
-@HiltViewModel
-class UserViewModel @Inject constructor(
-    private val getUserUseCase: GetUserUseCase
-) : ViewModel() { /* ... */ }
+// Fragment
+@AndroidEntryPoint
+class UserListFragment : Fragment() {
+    private val viewModel: UserListViewModel by viewModels()
+    @Inject lateinit var analytics: AnalyticsTracker
+}
 
-// Composable (via hiltViewModel())
-@Composable
-fun UserScreen() {
-    val viewModel: UserViewModel = hiltViewModel()
+// ViewModel
+@HiltViewModel
+class UserListViewModel @Inject constructor(
+    private val observeUsersUseCase: ObserveUsersUseCase
+) : ViewModel()
+
+// Composable
+@Composable fun UserListScreen() {
+    val viewModel: UserListViewModel = hiltViewModel()
 }
 ```
 
 ### Custom Qualifiers
 
+When you need two instances of the same type with different configurations:
+
 ```kotlin
-@Qualifier
-@Retention(AnnotationRetention.BINARY)
+@Qualifier @Retention(AnnotationRetention.BINARY)
 annotation class AuthenticatedOkHttpClient
 
-@Qualifier
-@Retention(AnnotationRetention.BINARY)
+@Qualifier @Retention(AnnotationRetention.BINARY)
 annotation class UnauthenticatedOkHttpClient
 
-@Module
-@InstallIn(SingletonComponent::class)
+@Module @InstallIn(SingletonComponent::class)
 object NetworkModule {
-
-    @Provides
-    @Singleton
-    @AuthenticatedOkHttpClient
+    @Provides @Singleton @AuthenticatedOkHttpClient
     fun provideAuthenticatedClient(authInterceptor: AuthInterceptor): OkHttpClient =
         OkHttpClient.Builder().addInterceptor(authInterceptor).build()
 
-    @Provides
-    @Singleton
-    @UnauthenticatedOkHttpClient
-    fun provideUnauthenticatedClient(): OkHttpClient =
-        OkHttpClient.Builder().build()
+    @Provides @Singleton @UnauthenticatedOkHttpClient
+    fun provideUnauthenticatedClient(): OkHttpClient = OkHttpClient.Builder().build()
+}
+
+// Usage
+class SomeDataSource @Inject constructor(
+    @AuthenticatedOkHttpClient private val authenticatedClient: OkHttpClient,
+    @UnauthenticatedOkHttpClient private val publicClient: OkHttpClient
+)
+```
+
+### Assisted Injection
+
+For classes that need both injected and runtime parameters:
+
+```kotlin
+class UserDetailViewModel @AssistedInject constructor(
+    @Assisted val userId: String,
+    private val getUserUseCase: GetUserUseCase
+) : ViewModel() {
+
+    @AssistedFactory
+    interface Factory {
+        fun create(userId: String): UserDetailViewModel
+    }
+}
+
+// In Compose — use hiltViewModel with the assisted factory
+@Composable
+fun UserDetailScreen(userId: String) {
+    val factory = hiltViewModel<UserDetailViewModelFactory>()
+    val viewModel = remember(userId) { factory.create(userId) }
+}
+```
+
+### Hilt Entry Points
+
+For code that cannot use constructor injection (e.g., `ContentProvider`, custom views):
+
+```kotlin
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface UserRepositoryEntryPoint {
+    fun userRepository(): UserRepository
+}
+
+// Usage
+val entryPoint = EntryPointAccessors.fromApplication(
+    context.applicationContext,
+    UserRepositoryEntryPoint::class.java
+)
+val userRepository = entryPoint.userRepository()
+```
+
+### WorkManager Integration
+
+```kotlin
+@HiltWorker
+class SyncWorker @AssistedInject constructor(
+    @Assisted context: Context,
+    @Assisted params: WorkerParameters,
+    private val userRepository: UserRepository
+) : CoroutineWorker(context, params) {
+
+    override suspend fun doWork(): Result = try {
+        userRepository.refreshUsers().getOrThrow()
+        Result.success()
+    } catch (e: Exception) {
+        if (runAttemptCount < 3) Result.retry() else Result.failure()
+    }
 }
 ```
 
@@ -1323,87 +1865,126 @@ object NetworkModule {
 ```kotlin
 @HiltAndroidTest
 class UserRepositoryTest {
-
     @get:Rule val hiltRule = HiltAndroidRule(this)
-
     @Inject lateinit var userRepository: UserRepository
 
-    @Before
-    fun setUp() { hiltRule.inject() }
+    @Before fun setUp() { hiltRule.inject() }
 
-    @Test
-    fun `getUser returns user from cache when available`() = runTest {
-        // test body
+    @Test fun `getUser returns user`() = runTest {
+        assertThat(userRepository.getUser("1").isSuccess).isTrue()
     }
 }
 
 // Replace production module in tests
-@TestInstallIn(
-    components = [SingletonComponent::class],
-    replaces = [NetworkModule::class]
-)
+@TestInstallIn(components = [SingletonComponent::class], replaces = [NetworkModule::class])
 @Module
 object FakeNetworkModule {
-
-    @Provides
-    @Singleton
+    @Provides @Singleton
     fun provideUserApiService(): UserApiService = FakeUserApiService()
 }
 ```
 
 ---
 
-## 11. Data Storage
+## 12. Data Storage
 
 ### Room
 
-Room is the recommended local persistence library for Android. It provides an abstraction layer over SQLite with compile-time query validation.
+### What is Room?
 
-#### Gradle Setup
+Room is Android's recommended SQLite abstraction library. It provides compile-time SQL query verification, coroutine and Flow support, and a clean annotation-based API for defining tables, queries, and migrations. Room eliminates the error-prone boilerplate of raw SQLite while giving you full access to all SQLite features.
+
+### Why Use Room?
+
+- **Compile-time safety:** SQL query errors are caught at build time, not at runtime.
+- **Flow support:** DAOs can return `Flow<T>`, so the UI automatically updates when the database changes.
+- **Migration support:** Structured API for managing schema changes without losing user data.
+- **Testing:** Swap `Room.databaseBuilder` for `Room.inMemoryDatabaseBuilder` in tests — zero I/O, instant.
+
+### When to Use Room?
+
+Whenever you need to store structured, relational data locally. Prefer Room over raw SQLite always, and over `SharedPreferences`/`DataStore` when data has relationships, needs querying, or needs to be observed reactively.
+
+### Gradle Setup
 
 ```kotlin
 dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")          // Coroutines + Flow support
     kapt("androidx.room:room-compiler:2.6.1")
+    testImplementation("androidx.room:room-testing:2.6.1")
 }
 ```
 
-#### Entity
+### Entities
 
 ```kotlin
 @Entity(
     tableName = "users",
-    indices = [Index(value = ["email"], unique = true)]
+    indices = [
+        Index(value = ["email"], unique = true),
+        Index(value = ["full_name"])
+    ]
 )
 data class UserEntity(
     @PrimaryKey val id: String,
-    @ColumnInfo(name = "full_name") val name: String,
+    @ColumnInfo(name = "full_name")  val name: String,
     val email: String,
     @ColumnInfo(name = "avatar_url") val avatarUrl: String?,
-    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+    @ColumnInfo(name = "is_active")  val isActive: Boolean = true,
+    @ColumnInfo(name = "cached_at")  val cachedAt: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "posts")
+@Entity(
+    tableName = "posts",
+    foreignKeys = [
+        ForeignKey(
+            entity        = UserEntity::class,
+            parentColumns = ["id"],
+            childColumns  = ["user_id"],
+            onDelete      = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index(value = ["user_id"])]
+)
 data class PostEntity(
     @PrimaryKey val id: String,
     val title: String,
     val body: String,
-    @ColumnInfo(name = "user_id") val userId: String
-)
-
-// Relationship
-data class UserWithPosts(
-    @Embedded val user: UserEntity,
-    @Relation(
-        parentColumn = "id",
-        entityColumn = "user_id"
-    )
-    val posts: List<PostEntity>
+    @ColumnInfo(name = "user_id")    val userId: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
 )
 ```
 
-#### DAO
+### Relationships
+
+```kotlin
+// One-to-many: User has many Posts
+data class UserWithPosts(
+    @Embedded val user: UserEntity,
+    @Relation(parentColumn = "id", entityColumn = "user_id")
+    val posts: List<PostEntity>
+)
+
+// Many-to-many: Users belong to many Groups
+@Entity(tableName = "user_group_cross_ref", primaryKeys = ["user_id", "group_id"])
+data class UserGroupCrossRef(
+    @ColumnInfo(name = "user_id")  val userId: String,
+    @ColumnInfo(name = "group_id") val groupId: String
+)
+
+data class UserWithGroups(
+    @Embedded val user: UserEntity,
+    @Relation(
+        parentColumn    = "id",
+        entityColumn    = "group_id",
+        associateBy     = Junction(UserGroupCrossRef::class, parentColumn = "user_id", entityColumn = "group_id")
+    )
+    val groups: List<GroupEntity>
+)
+```
+
+### DAO
 
 ```kotlin
 @Dao
@@ -1412,24 +1993,26 @@ interface UserDao {
     @Query("SELECT * FROM users WHERE id = :id")
     suspend fun findById(id: String): UserEntity?
 
-    @Query("SELECT * FROM users ORDER BY full_name ASC")
+    @Query("SELECT * FROM users WHERE id = :id")
+    fun observeById(id: String): Flow<UserEntity?>
+
+    @Query("SELECT * FROM users WHERE is_active = 1 ORDER BY full_name ASC")
     fun observeAll(): Flow<List<UserEntity>>
+
+    @Query("SELECT * FROM users WHERE is_active = 1 ORDER BY full_name ASC")
+    suspend fun getAll(): List<UserEntity>
 
     @Query("""
         SELECT * FROM users
         WHERE full_name LIKE '%' || :query || '%'
            OR email LIKE '%' || :query || '%'
+        ORDER BY full_name ASC
     """)
     fun search(query: String): Flow<List<UserEntity>>
 
-    @Upsert
-    suspend fun upsert(user: UserEntity)
-
-    @Upsert
-    suspend fun upsertAll(users: List<UserEntity>)
-
-    @Delete
-    suspend fun delete(user: UserEntity)
+    @Upsert suspend fun upsert(user: UserEntity)
+    @Upsert suspend fun upsertAll(users: List<UserEntity>)
+    @Delete suspend fun delete(user: UserEntity)
 
     @Query("DELETE FROM users WHERE id = :id")
     suspend fun deleteById(id: String)
@@ -1440,55 +2023,109 @@ interface UserDao {
     @Transaction
     @Query("SELECT * FROM users WHERE id = :userId")
     suspend fun getUserWithPosts(userId: String): UserWithPosts?
+
+    @Transaction
+    @Query("SELECT * FROM users")
+    fun observeAllWithPosts(): Flow<List<UserWithPosts>>
+
+    // Batch operations in a single transaction
+    @Transaction
+    suspend fun replaceAll(users: List<UserEntity>) {
+        deleteAll()
+        upsertAll(users)
+    }
 }
 ```
 
-#### Database
+### Database
 
 ```kotlin
 @Database(
-    entities = [UserEntity::class, PostEntity::class],
-    version = 2,
-    exportSchema = true
+    entities = [UserEntity::class, PostEntity::class, UserGroupCrossRef::class],
+    version  = 3,
+    exportSchema = true                           // Save schema JSON to version-control
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
-
     abstract fun userDao(): UserDao
     abstract fun postDao(): PostDao
 }
 
+// Migrations — never use fallbackToDestructiveMigration in production
 val MIGRATION_1_2 = object : Migration(1, 2) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("ALTER TABLE users ADD COLUMN avatar_url TEXT")
     }
 }
 
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    }
+}
+
 class Converters {
-    @TypeConverter fun fromTimestamp(value: Long?): Date? = value?.let { Date(it) }
-    @TypeConverter fun dateToTimestamp(date: Date?): Long? = date?.time
+    @TypeConverter fun longToDate(value: Long?): Date?  = value?.let { Date(it) }
+    @TypeConverter fun dateToLong(date: Date?): Long?   = date?.time
+    @TypeConverter fun stringToList(value: String?): List<String> =
+        value?.split(",")?.filter { it.isNotEmpty() } ?: emptyList()
+    @TypeConverter fun listToString(list: List<String>?): String =
+        list?.joinToString(",") ?: ""
 }
 ```
 
-#### Hilt Module for Room
+### Hilt Module for Room
 
 ```kotlin
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
 
-    @Provides
-    @Singleton
+    @Provides @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
-        Room.databaseBuilder(context, AppDatabase::class.java, "app_database")
-            .addMigrations(MIGRATION_1_2)
+        Room.databaseBuilder(context, AppDatabase::class.java, "app.db")
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build()
 
-    @Provides
-    fun provideUserDao(db: AppDatabase): UserDao = db.userDao()
+    @Provides fun provideUserDao(db: AppDatabase): UserDao = db.userDao()
+    @Provides fun providePostDao(db: AppDatabase): PostDao = db.postDao()
+}
+```
 
-    @Provides
-    fun providePostDao(db: AppDatabase): PostDao = db.postDao()
+### Testing Room with In-Memory Database
+
+```kotlin
+@RunWith(AndroidJUnit4::class)
+class UserDaoTest {
+    private lateinit var db: AppDatabase
+    private lateinit var userDao: UserDao
+
+    @Before fun setUp() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()             // OK in tests only
+            .build()
+        userDao = db.userDao()
+    }
+
+    @After fun tearDown() { db.close() }
+
+    @Test fun `upsert and findById returns the same entity`() = runTest {
+        val entity = UserEntity("1", "Alice", "alice@example.com", null)
+        userDao.upsert(entity)
+        assertThat(userDao.findById("1")).isEqualTo(entity)
+    }
+
+    @Test fun `observeAll emits update after upsert`() = runTest {
+        val emissions = mutableListOf<List<UserEntity>>()
+        val job = launch { userDao.observeAll().take(2).toList(emissions) }
+
+        userDao.upsert(UserEntity("1", "Alice", "alice@example.com", null))
+
+        job.join()
+        assertThat(emissions).hasSize(2)
+        assertThat(emissions[1]).hasSize(1)
+    }
 }
 ```
 
@@ -1496,25 +2133,41 @@ object DatabaseModule {
 
 ### SharedPreferences & SecureSharedPreferences
 
-Use `SharedPreferences` for non-sensitive key-value pairs. Use `EncryptedSharedPreferences` (from Jetpack Security) for sensitive data such as tokens and user credentials.
+### What are SharedPreferences and EncryptedSharedPreferences?
 
-#### Gradle Dependencies
+`SharedPreferences` is Android's built-in key-value store for persisting primitive data (booleans, strings, ints, longs). Data is saved to a plaintext XML file in the app's private directory. `EncryptedSharedPreferences` (from Jetpack Security) wraps `SharedPreferences` with AES-256 encryption for both keys and values, making it suitable for sensitive data such as authentication tokens.
+
+### Why Use Them?
+
+For lightweight, non-relational user preferences (theme choice, language, feature flags), `SharedPreferences`/`DataStore` is far simpler than Room. For secrets that must never be readable in plaintext (tokens, PINs), `EncryptedSharedPreferences` is a secure, battle-tested solution that integrates with Android's `Keystore` system.
+
+### When to Use Which?
+
+| Data | Use |
+|------|-----|
+| UI preferences (dark mode, language) | `SharedPreferences` or `DataStore` |
+| Auth tokens, refresh tokens | `EncryptedSharedPreferences` |
+| Structured / relational data | Room |
+| Large blobs, files | `File` / `ContentResolver` |
+
+For **new projects**, prefer `DataStore<Preferences>` over `SharedPreferences` — it is coroutine-native, type-safe, and does not suffer from `apply()`/`commit()` ambiguity. Use `EncryptedSharedPreferences` for secrets (DataStore does not yet have an officially stable encrypted variant for general use).
+
+### Gradle Dependencies
 
 ```kotlin
 dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
-    // For DataStore (modern alternative)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 }
 ```
 
-#### SharedPreferences (Non-sensitive)
+### SharedPreferences (Non-sensitive)
 
 ```kotlin
 class AppPreferences @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    private val prefs: SharedPreferences by lazy {
+    private val prefs by lazy {
         context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
     }
 
@@ -1530,6 +2183,16 @@ class AppPreferences @Inject constructor(
         get() = prefs.getLong(KEY_LAST_SYNC, 0L)
         set(value) = prefs.edit { putLong(KEY_LAST_SYNC, value) }
 
+    // Observe a preference reactively using callbackFlow
+    fun observeDarkMode(): Flow<Boolean> = callbackFlow {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_DARK_MODE) trySend(prefs.getBoolean(KEY_DARK_MODE, false))
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        send(prefs.getBoolean(KEY_DARK_MODE, false)) // emit current value immediately
+        awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }.distinctUntilChanged()
+
     fun clearAll() = prefs.edit { clear() }
 
     companion object {
@@ -1540,19 +2203,19 @@ class AppPreferences @Inject constructor(
 }
 ```
 
-#### EncryptedSharedPreferences (Sensitive)
+### EncryptedSharedPreferences (Sensitive Data)
 
 ```kotlin
 class SecurePreferences @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    private val masterKey: MasterKey by lazy {
+    private val masterKey by lazy {
         MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
     }
 
-    private val prefs: SharedPreferences by lazy {
+    private val prefs by lazy {
         EncryptedSharedPreferences.create(
             context,
             "secure_prefs",
@@ -1564,27 +2227,18 @@ class SecurePreferences @Inject constructor(
 
     var authToken: String?
         get() = prefs.getString(KEY_AUTH_TOKEN, null)
-        set(value) = if (value != null) {
-            prefs.edit { putString(KEY_AUTH_TOKEN, value) }
-        } else {
-            prefs.edit { remove(KEY_AUTH_TOKEN) }
-        }
+        set(value) = if (value != null) prefs.edit { putString(KEY_AUTH_TOKEN, value) }
+                     else prefs.edit { remove(KEY_AUTH_TOKEN) }
 
     var refreshToken: String?
         get() = prefs.getString(KEY_REFRESH_TOKEN, null)
-        set(value) = if (value != null) {
-            prefs.edit { putString(KEY_REFRESH_TOKEN, value) }
-        } else {
-            prefs.edit { remove(KEY_REFRESH_TOKEN) }
-        }
+        set(value) = if (value != null) prefs.edit { putString(KEY_REFRESH_TOKEN, value) }
+                     else prefs.edit { remove(KEY_REFRESH_TOKEN) }
 
     var userId: String?
         get() = prefs.getString(KEY_USER_ID, null)
-        set(value) = if (value != null) {
-            prefs.edit { putString(KEY_USER_ID, value) }
-        } else {
-            prefs.edit { remove(KEY_USER_ID) }
-        }
+        set(value) = if (value != null) prefs.edit { putString(KEY_USER_ID, value) }
+                     else prefs.edit { remove(KEY_USER_ID) }
 
     fun clearSession() = prefs.edit { clear() }
 
@@ -1596,7 +2250,7 @@ class SecurePreferences @Inject constructor(
 }
 ```
 
-#### Session Manager (Combining Both)
+### Session Manager
 
 ```kotlin
 class SessionManager @Inject constructor(
@@ -1606,12 +2260,14 @@ class SessionManager @Inject constructor(
     val isLoggedIn: Boolean get() = securePreferences.authToken != null
 
     fun saveSession(token: AuthToken) {
-        securePreferences.authToken = token.accessToken
+        securePreferences.authToken    = token.accessToken
         securePreferences.refreshToken = token.refreshToken
-        securePreferences.userId = token.userId
+        securePreferences.userId       = token.userId
     }
 
-    fun getToken(): String? = securePreferences.authToken
+    fun getToken(): String?        = securePreferences.authToken
+    fun getRefreshToken(): String? = securePreferences.refreshToken
+    fun getUserId(): String?       = securePreferences.userId
 
     fun clearSession() {
         securePreferences.clearSession()
@@ -1620,73 +2276,102 @@ class SessionManager @Inject constructor(
 }
 ```
 
-#### Modern Alternative: DataStore
+### Modern Alternative: DataStore
 
-For new projects, prefer `DataStore<Preferences>` over `SharedPreferences`. It is coroutine-friendly, type-safe, and handles errors more gracefully:
+For new projects, `DataStore<Preferences>` is the recommended replacement for `SharedPreferences`. It is coroutine-native, never blocks the main thread, and handles `IOException` gracefully via Flow error handling.
 
 ```kotlin
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
+private val Context.dataStore: DataStore<Preferences> by preferencesDataStore("settings")
 
 class SettingsRepository @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     companion object {
-        val DARK_MODE_KEY = booleanPreferencesKey("dark_mode")
-        val LANGUAGE_KEY  = stringPreferencesKey("language")
+        val DARK_MODE_KEY  = booleanPreferencesKey("dark_mode")
+        val LANGUAGE_KEY   = stringPreferencesKey("language")
+        val ONBOARDING_KEY = booleanPreferencesKey("onboarding_complete")
     }
 
+    // Read — returns a Flow that emits on every change
     val isDarkModeEnabled: Flow<Boolean> = context.dataStore.data
-        .catch { e ->
-            if (e is IOException) emit(emptyPreferences())
-            else throw e
-        }
-        .map { prefs -> prefs[DARK_MODE_KEY] ?: false }
+        .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+        .map { it[DARK_MODE_KEY] ?: false }
 
+    val selectedLanguage: Flow<String> = context.dataStore.data
+        .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+        .map { it[LANGUAGE_KEY] ?: "en" }
+
+    // Write — suspending, never blocks the main thread
     suspend fun setDarkMode(enabled: Boolean) {
-        context.dataStore.edit { prefs -> prefs[DARK_MODE_KEY] = enabled }
+        context.dataStore.edit { it[DARK_MODE_KEY] = enabled }
+    }
+
+    suspend fun setLanguage(language: String) {
+        context.dataStore.edit { it[LANGUAGE_KEY] = language }
+    }
+
+    // Atomic multi-field update
+    suspend fun completeOnboarding(language: String) {
+        context.dataStore.edit { prefs ->
+            prefs[ONBOARDING_KEY] = true
+            prefs[LANGUAGE_KEY]   = language
+        }
     }
 }
 ```
 
 ---
 
-## 12. Image Loading with COIL
+## 13. Image Loading with COIL
 
-COIL (Coroutine Image Loader) is a modern, Kotlin-first image loading library built with coroutines, OkHttp, and AndroidX.
+### What is COIL?
+
+COIL (Coroutine Image Loader) is a modern, Kotlin-first image loading library built with Kotlin coroutines, OkHttp, and Jetpack. It loads, caches, and displays images from URLs, resources, files, and custom data sources. COIL is Compose-native through its `AsyncImage` composable.
+
+### Why Use COIL?
+
+- **Kotlin-first:** Built entirely in Kotlin with coroutines — no callback APIs.
+- **Compose-native:** `AsyncImage` integrates directly with the Compose rendering pipeline.
+- **OkHttp reuse:** Shares the app's OkHttp client — one connection pool, one disk cache, one interceptor chain.
+- **Small footprint:** Adds ~120KB to APK size. Far smaller than Glide or Picasso.
+- **Automatic lifecycle awareness:** Cancels image requests when the Composable leaves the composition.
+
+### When to Use COIL?
+
+Any time you need to load remote or local images. Use `AsyncImage` in Compose screens; use the `ImageLoader` directly for preloading or non-UI use cases.
 
 ### Gradle Dependencies
 
 ```kotlin
 dependencies {
     implementation("io.coil-kt:coil-compose:2.6.0")
-    implementation("io.coil-kt:coil-gif:2.6.0")    // GIF support
+    implementation("io.coil-kt:coil-gif:2.6.0")    // Animated GIF support
     implementation("io.coil-kt:coil-svg:2.6.0")    // SVG support
-    implementation("io.coil-kt:coil-video:2.6.0")  // Video thumbnails
+    implementation("io.coil-kt:coil-video:2.6.0")  // Video thumbnail support
 }
 ```
 
 ### Basic Usage in Compose
 
 ```kotlin
-// Simple image from URL
+// Minimal — URL loaded asynchronously, placeholder shown while loading
 AsyncImage(
-    model = "https://example.com/image.jpg",
-    contentDescription = "Profile picture",
-    modifier = Modifier
-        .size(80.dp)
-        .clip(CircleShape)
+    model = "https://example.com/avatar.jpg",
+    contentDescription = "User avatar",
+    modifier = Modifier.size(48.dp).clip(CircleShape)
 )
 
-// With placeholder, error fallback, and content scale
+// Full control — placeholder, error fallback, crossfade animation, content scale
 AsyncImage(
     model = ImageRequest.Builder(LocalContext.current)
-        .data("https://example.com/image.jpg")
+        .data("https://example.com/avatar.jpg")
         .crossfade(true)
-        .crossfade(300)
+        .crossfade(durationMillis = 300)
         .build(),
     contentDescription = "User avatar",
-    placeholder = painterResource(R.drawable.placeholder_avatar),
-    error = painterResource(R.drawable.error_avatar),
+    placeholder  = painterResource(R.drawable.placeholder_avatar),
+    error        = painterResource(R.drawable.error_avatar),
+    fallback     = painterResource(R.drawable.default_avatar),
     contentScale = ContentScale.Crop,
     modifier = Modifier
         .size(64.dp)
@@ -1695,43 +2380,55 @@ AsyncImage(
 )
 ```
 
-### Coil Singleton Configuration (with Hilt)
+### Singleton ImageLoader Configuration with Hilt
 
 ```kotlin
 @Module
 @InstallIn(SingletonComponent::class)
 object CoilModule {
 
-    @Provides
-    @Singleton
+    @Provides @Singleton
     fun provideImageLoader(
         @ApplicationContext context: Context,
-        okHttpClient: OkHttpClient
+        okHttpClient: OkHttpClient          // Reuse the app's authenticated OkHttp client
     ): ImageLoader = ImageLoader.Builder(context)
-        .okHttpClient(okHttpClient)         // Reuse app's OkHttp (shares cache & interceptors)
+        .okHttpClient(okHttpClient)
         .crossfade(true)
         .memoryCache {
             MemoryCache.Builder(context)
-                .maxSizePercent(0.25)       // Use 25% of available memory
+                .maxSizePercent(0.25)       // 25% of available RAM
                 .build()
         }
         .diskCache {
             DiskCache.Builder()
-                .directory(context.cacheDir.resolve("image_cache"))
-                .maxSizePercent(0.02)       // 2% of disk space
+                .directory(context.cacheDir.resolve("coil_image_cache"))
+                .maxSizePercent(0.02)       // 2% of available disk
                 .build()
         }
-        .respectCacheHeaders(false)
+        .respectCacheHeaders(false)         // Cache images even if server says no-cache
         .components {
             add(GifDecoder.Factory())
             add(SvgDecoder.Factory(context))
+            add(VideoFrameDecoder.Factory())
         }
-        .logger(DebugLogger())
+        .apply { if (BuildConfig.DEBUG) logger(DebugLogger()) }
         .build()
 }
 ```
 
-### Transformations
+### Providing the ImageLoader in Compose
+
+```kotlin
+// In your root composable or Activity:
+val imageLoader: ImageLoader = hiltViewModel<CoilViewModel>().imageLoader
+
+CompositionLocalProvider(LocalImageLoader provides imageLoader) {
+    AppNavHost()
+}
+// AsyncImage will now automatically pick up the singleton ImageLoader
+```
+
+### Image Transformations
 
 ```kotlin
 AsyncImage(
@@ -1739,73 +2436,135 @@ AsyncImage(
         .data(imageUrl)
         .transformations(
             CircleCropTransformation(),
-            RoundedCornersTransformation(radius = 16f),
-            BlurTransformation(context, radius = 10f, sampling = 2f)
+            RoundedCornersTransformation(topLeft = 16f, topRight = 16f, bottomLeft = 0f, bottomRight = 0f),
+            BlurTransformation(context, radius = 8f, sampling = 2f),
+            GrayscaleTransformation()
         )
         .build(),
     contentDescription = null
 )
 ```
 
-### SubcomposeAsyncImage (Custom Loading/Error States)
+### SubcomposeAsyncImage — Full Custom Loading/Error States
 
 ```kotlin
 SubcomposeAsyncImage(
     model = imageUrl,
     contentDescription = "Product image"
 ) {
-    when (painter.state) {
+    when (val state = painter.state) {
         is AsyncImagePainter.State.Loading -> {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .shimmer(),                     // shimmer loading effect
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(strokeWidth = 2.dp)
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp
+                )
             }
         }
         is AsyncImagePainter.State.Error -> {
-            Image(
-                painter = painterResource(R.drawable.ic_broken_image),
-                contentDescription = "Failed to load"
-            )
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(Icons.Default.BrokenImage, contentDescription = null)
+                Text("Failed to load", style = MaterialTheme.typography.bodySmall)
+            }
         }
-        else -> SubcomposeAsyncImageContent()
+        is AsyncImagePainter.State.Success -> SubcomposeAsyncImageContent()
+        is AsyncImagePainter.State.Empty   -> {}
     }
 }
 ```
 
 ### Preloading Images
 
+Preload images before they are needed to eliminate visible loading states in fast-scrolling lists:
+
 ```kotlin
-val imageLoader = LocalImageLoader.current
-LaunchedEffect(nextImageUrl) {
-    val request = ImageRequest.Builder(context)
-        .data(nextImageUrl)
-        .memoryCachePolicy(CachePolicy.ENABLED)
-        .build()
-    imageLoader.enqueue(request)
+@Composable
+fun UserListScreen(viewModel: UserListViewModel = hiltViewModel()) {
+    val users by viewModel.users.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val imageLoader = LocalImageLoader.current
+
+    // Preload the next page of avatars when nearing the end of the list
+    val listState = rememberLazyListState()
+    LaunchedEffect(users) {
+        users.takeLast(5).forEach { user ->
+            imageLoader.enqueue(
+                ImageRequest.Builder(context)
+                    .data(user.avatarUrl)
+                    .memoryCachePolicy(CachePolicy.ENABLED)
+                    .diskCachePolicy(CachePolicy.ENABLED)
+                    .build()
+            )
+        }
+    }
+
+    LazyColumn(state = listState) {
+        items(users, key = { it.id }) { user ->
+            UserCard(user = user, onUserClick = {})
+        }
+    }
 }
 ```
 
-### Image Loading in Non-Compose Code
+### Non-Compose Usage (ViewModels, Workers)
 
 ```kotlin
-class UserAvatarViewModel @Inject constructor(
+class ThumbnailPreloaderViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val imageLoader: ImageLoader
 ) : ViewModel() {
 
-    fun preloadAvatars(urls: List<String>) {
-        urls.forEach { url ->
-            val request = ImageRequest.Builder(context)
-                .data(url)
-                .build()
-            imageLoader.enqueue(request)
+    fun preloadThumbnails(urls: List<String>) {
+        viewModelScope.launch {
+            urls.map { url ->
+                async {
+                    imageLoader.execute(
+                        ImageRequest.Builder(context)
+                            .data(url)
+                            .size(128, 128)                 // Decode to thumbnail size only
+                            .allowHardware(false)
+                            .build()
+                    )
+                }
+            }.awaitAll()
         }
     }
 }
+```
+
+### Memory Management
+
+```kotlin
+// Limit decode size to avoid OOM on large images
+AsyncImage(
+    model = ImageRequest.Builder(LocalContext.current)
+        .data(highResImageUrl)
+        .size(640, 480)                     // Decode to this size, not the original resolution
+        .allowHardware(true)                // Use hardware bitmaps for better performance
+        .memoryCacheKey("$highResImageUrl-640x480")
+        .build(),
+    contentDescription = null
+)
+
+// Disable memory cache for one-off images (e.g., camera previews)
+AsyncImage(
+    model = ImageRequest.Builder(LocalContext.current)
+        .data(uri)
+        .memoryCachePolicy(CachePolicy.DISABLED)
+        .diskCachePolicy(CachePolicy.DISABLED)
+        .build(),
+    contentDescription = null
+)
 ```
 
 ---
