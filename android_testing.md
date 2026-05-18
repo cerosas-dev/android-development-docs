@@ -899,3 +899,285 @@ class DependencyGraphTest {
 
 ---
 
+## 5. UI Tests with Jetpack Compose
+
+### What are UI Tests?
+
+UI tests interact with your app's interface the way a real user would — they find elements, tap them, type text, scroll lists, and verify what is displayed. In a Compose app, Jetpack Compose Test replaces Espresso as the primary UI testing framework. Tests run against a real rendered Compose tree using a test `Activity` that hosts the composable under test.
+
+### Why Write UI Tests?
+
+Unit tests cannot verify that the UI reacts correctly to state changes. A ViewModel test can verify that `_uiState.value = UiState.Success(user)` is reached, but only a UI test can verify that the correct name appears on screen, that the loading spinner disappears, and that clicking the button triggers the right action. UI tests are the only tests that catch wiring errors between the ViewModel and the composable.
+
+### When to Write UI Tests?
+
+Write UI tests for:
+- **Critical user journeys** (login flow, checkout, onboarding).
+- **Screen-level state rendering** (loading → success → error transitions).
+- **Interactive components** (forms, dialogs, bottom sheets).
+- **Navigation** (tapping an item navigates to the detail screen).
+
+Do not write UI tests for visual styling (use screenshot tests instead) or pure logic (use unit tests instead).
+
+---
+
+### Gradle Setup
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    // Compose UI test — core library
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.6.8")
+
+    // Needed to host composables in a test Activity
+    debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.8")
+
+    // Hilt for instrumented tests
+    androidTestImplementation("com.google.dagger:hilt-android-testing:2.51.1")
+    kaptAndroidTest("com.google.dagger:hilt-android-compiler:2.51.1")
+
+    // AndroidX Test
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+
+    // Truth
+    androidTestImplementation("com.google.truth:truth:1.4.2")
+}
+```
+
+---
+
+### ComposeTestRule — The Entry Point
+
+`ComposeTestRule` hosts a composable inside a test `Activity` and provides the API for finding nodes, performing actions, and making assertions.
+
+```kotlin
+// For testing a Composable in isolation — no Activity needed
+@get:Rule val composeTestRule = createComposeRule()
+
+// For testing with a real Activity (navigation, system back, etc.)
+@get:Rule val activityRule = createAndroidComposeRule<MainActivity>()
+```
+
+---
+
+### Finders, Actions, and Assertions
+
+#### Finders — Locate a node in the composition
+
+```kotlin
+// By text content (case-sensitive by default)
+composeTestRule.onNodeWithText("Sign In")
+composeTestRule.onNodeWithText("Sign In", ignoreCase = true)
+
+// By content description (for icons / images)
+composeTestRule.onNodeWithContentDescription("Back")
+
+// By test tag — the most reliable selector
+composeTestRule.onNodeWithTag("email_field")
+
+// By role
+composeTestRule.onNode(hasClickAction())
+
+// Combine matchers
+composeTestRule.onNode(hasText("Alice") and hasClickAction())
+
+// All matching nodes
+composeTestRule.onAllNodesWithText("Delete")
+```
+
+Set test tags in production code:
+```kotlin
+OutlinedTextField(
+    value = email,
+    onValueChange = onEmailChanged,
+    modifier = Modifier.testTag("email_field")
+)
+```
+
+#### Actions — Interact with a node
+
+```kotlin
+composeTestRule.onNodeWithText("Sign In").performClick()
+composeTestRule.onNodeWithTag("email_field").performTextInput("alice@example.com")
+composeTestRule.onNodeWithTag("email_field").performTextClearance()
+composeTestRule.onNodeWithTag("password_field").performTextInput("Password1")
+composeTestRule.onNodeWithTag("user_list").performScrollToIndex(50)
+composeTestRule.onNodeWithTag("user_card_0").performTouchInput { swipeLeft() }
+```
+
+#### Assertions — Verify node state
+
+```kotlin
+composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
+composeTestRule.onNodeWithText("Alice").assertExists()
+composeTestRule.onNodeWithText("DeletedItem").assertDoesNotExist()
+composeTestRule.onNodeWithTag("submit_button").assertIsEnabled()
+composeTestRule.onNodeWithTag("submit_button").assertIsNotEnabled()
+composeTestRule.onNodeWithTag("email_field").assertTextContains("alice@example.com")
+composeTestRule.onAllNodesWithTag("user_card").assertCountEquals(3)
+```
+
+---
+
+### Testing a Stateless Composable in Isolation
+
+Always prefer testing stateless composables directly — no ViewModel needed:
+
+```kotlin
+@RunWith(AndroidJUnit4::class)
+class UserCardTest {
+
+    @get:Rule val composeTestRule = createComposeRule()
+
+    private val testUser = User("u1", "Alice Smith", "alice@example.com", null)
+
+    @Test
+    fun displaysUserNameAndEmail() {
+        composeTestRule.setContent {
+            AppTheme { UserCard(user = testUser, onUserClick = {}) }
+        }
+
+        composeTestRule.onNodeWithText("Alice Smith").assertIsDisplayed()
+        composeTestRule.onNodeWithText("alice@example.com").assertIsDisplayed()
+    }
+
+    @Test
+    fun clickInvokesOnUserClickWithCorrectId() {
+        var clickedId = ""
+        composeTestRule.setContent {
+            AppTheme { UserCard(user = testUser, onUserClick = { clickedId = it }) }
+        }
+
+        composeTestRule.onNodeWithText("Alice Smith").performClick()
+
+        assertThat(clickedId).isEqualTo("u1")
+    }
+
+    @Test
+    fun errorStateDisplaysRetryButton() {
+        composeTestRule.setContent {
+            AppTheme {
+                ErrorScreen(
+                    message = "Something went wrong",
+                    onRetry = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Something went wrong").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Retry").assertIsDisplayed()
+    }
+}
+```
+
+---
+
+### Testing a Screen with a ViewModel (Hilt)
+
+Use `@HiltAndroidTest` for screens that get their ViewModel via `hiltViewModel()`:
+
+```kotlin
+@HiltAndroidTest
+@RunWith(AndroidJUnit4::class)
+class UserListScreenTest {
+
+    @get:Rule(order = 0) val hiltRule = HiltAndroidRule(this)
+    @get:Rule(order = 1) val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    @Inject lateinit var fakeUserRepository: FakeUserRepository
+
+    @Before fun setUp() { hiltRule.inject() }
+
+    @Test
+    fun showsLoadingIndicator_initially() {
+        fakeUserRepository.isLoading = true
+        composeTestRule.setContent { AppTheme { UserListScreen(onNavigateToDetail = {}) } }
+
+        composeTestRule.onNodeWithTag("loading_indicator").assertIsDisplayed()
+    }
+
+    @Test
+    fun showsUserList_whenDataLoads() {
+        fakeUserRepository.stubbedUsers = listOf(
+            User("u1", "Alice", "alice@example.com", null),
+            User("u2", "Bob",   "bob@example.com",   null)
+        )
+        composeTestRule.setContent { AppTheme { UserListScreen(onNavigateToDetail = {}) } }
+
+        composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Bob").assertIsDisplayed()
+    }
+
+    @Test
+    fun showsErrorMessage_whenRepositoryFails() {
+        fakeUserRepository.shouldThrow = IOException("Network unavailable")
+        composeTestRule.setContent { AppTheme { UserListScreen(onNavigateToDetail = {}) } }
+
+        composeTestRule.onNodeWithText("Network unavailable", substring = true).assertIsDisplayed()
+    }
+}
+
+// Replacement module for tests
+@TestInstallIn(components = [SingletonComponent::class], replaces = [RepositoryModule::class])
+@Module
+abstract class FakeRepositoryModule {
+    @Binds @Singleton
+    abstract fun bindUserRepository(fake: FakeUserRepository): UserRepository
+}
+```
+
+---
+
+### Testing Navigation
+
+```kotlin
+@HiltAndroidTest
+@RunWith(AndroidJUnit4::class)
+class NavigationTest {
+
+    @get:Rule(order = 0) val hiltRule = HiltAndroidRule(this)
+    @get:Rule(order = 1) val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    @Inject lateinit var fakeUserRepository: FakeUserRepository
+
+    @Before
+    fun setUp() {
+        hiltRule.inject()
+        fakeUserRepository.stubbedUsers = listOf(User("u1", "Alice", "alice@example.com", null))
+    }
+
+    @Test
+    fun tappingUser_navigatesToDetailScreen() {
+        composeTestRule.setContent { AppTheme { AppNavHost() } }
+
+        // We're on the list screen
+        composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
+
+        // Tap the user card
+        composeTestRule.onNodeWithText("Alice").performClick()
+
+        // We should now be on the detail screen
+        composeTestRule.onNodeWithTag("user_detail_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithText("alice@example.com").assertIsDisplayed()
+    }
+}
+```
+
+---
+
+### Handling Asynchronous State
+
+Compose Test has built-in idle synchronisation — it waits for the Compose rendering and coroutines to settle before checking assertions. For explicit waiting, use `waitUntil`:
+
+```kotlin
+// Wait up to 5 seconds for a condition to become true
+composeTestRule.waitUntil(timeoutMillis = 5_000) {
+    composeTestRule.onAllNodesWithText("Alice").fetchSemanticsNodes().isNotEmpty()
+}
+
+composeTestRule.onNodeWithText("Alice").assertIsDisplayed()
+```
+
+---
+
