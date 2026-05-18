@@ -213,3 +213,116 @@ Expected: **PASS** — all tests still green after refactor.
 
 ---
 
+## 3. Unit Tests
+
+### What are Unit Tests?
+
+A unit test verifies the behaviour of a **single, isolated unit of code** — typically one class or one function. All external dependencies (repositories, data sources, APIs, databases) are replaced with fakes or mocks so the test only exercises the code under test.
+
+Unit tests live in `src/test/` and run entirely on the JVM without a device or emulator. They have no access to the Android framework (`Context`, `Activity`, `View`). This is intentional: if your business logic requires Android framework classes, it belongs in the wrong layer.
+
+### Why Write Unit Tests?
+
+Unit tests are the foundation of confidence in your codebase. They are:
+- **Fast:** A suite of 500 unit tests typically runs in under 10 seconds.
+- **Precise:** A failing unit test points directly at the broken class.
+- **Cheap to maintain:** No emulator setup, no flakiness from async timing or network state.
+- **Design feedback:** If a class is hard to unit test, it is too tightly coupled.
+
+### When to Write Unit Tests?
+
+Write a unit test for every non-trivial behaviour: use cases, ViewModel state transitions, repository cache strategies, mappers, validators, and pure functions. Skip unit tests only for trivial wiring code (Hilt modules, data class definitions) that has no logic of its own.
+
+---
+
+### Gradle Setup
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    // JUnit 4 runner
+    testImplementation("junit:junit:4.13.2")
+
+    // MockK — Kotlin-first mocking library
+    testImplementation("io.mockk:mockk:1.13.10")
+
+    // Kotlin Coroutines test utilities
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+
+    // Google Truth — readable assertions
+    testImplementation("com.google.truth:truth:1.4.2")
+
+    // Turbine — Flow testing
+    testImplementation("app.cash.turbine:turbine:1.1.0")
+}
+```
+
+---
+
+### MainDispatcherRule — Required for Every ViewModel Test
+
+`viewModelScope` defaults to `Dispatchers.Main`. In tests there is no Android main looper, so you must replace it with a test dispatcher:
+
+```kotlin
+// src/test/kotlin/com/example/app/util/MainDispatcherRule.kt
+@OptIn(ExperimentalCoroutinesApi::class)
+class MainDispatcherRule(
+    private val dispatcher: TestCoroutineDispatcher = TestCoroutineDispatcher()
+) : TestWatcher() {
+
+    override fun starting(description: Description) {
+        Dispatchers.setMain(dispatcher)
+    }
+
+    override fun finished(description: Description) {
+        Dispatchers.resetMain()
+        dispatcher.cleanupTestCoroutines()
+    }
+}
+```
+
+Apply it to every ViewModel test class:
+
+```kotlin
+@get:Rule val mainDispatcherRule = MainDispatcherRule()
+```
+
+---
+
+### Fakes vs Mocks
+
+Prefer **fakes** (handwritten implementations) for stable interfaces; use **mocks** (MockK) for complex interactions that are expensive to fake or where call verification matters.
+
+| | Fake | Mock (MockK) |
+|---|---|---|
+| **What** | Handwritten implementation of an interface | Auto-generated proxy that records and verifies calls |
+| **When** | Stable interface, multiple test reuse | Verifying call count / order, complex return sequences |
+| **Readability** | High — reads like real code | Medium — DSL can be verbose |
+| **Fragility** | Low — ignores irrelevant calls | Medium — every unexpected call may fail |
+
+```kotlin
+// Fake — simple, reusable across many tests
+class FakeUserRepository : UserRepository {
+    var stubbedUser: User? = null
+    var savedUsers = mutableListOf<User>()
+
+    override suspend fun getUser(id: String): Result<User> =
+        stubbedUser?.let { Result.success(it) }
+            ?: Result.failure(NoSuchElementException("User $id not found"))
+
+    override suspend fun saveUser(user: User): Result<Unit> {
+        savedUsers.add(user)
+        return Result.success(Unit)
+    }
+
+    override fun observeUsers(): Flow<List<User>> = flowOf(savedUsers.toList())
+}
+
+// Mock — for verifying interactions
+val mockAnalytics = mockk<AnalyticsTracker>(relaxed = true)
+viewModel.trackEvent("login")
+verify(exactly = 1) { mockAnalytics.track("login") }
+```
+
+---
+
