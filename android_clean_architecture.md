@@ -8,17 +8,18 @@
 2. [Recommended Codebase Structure](#2-recommended-codebase-structure)
 3. [SOLID Principles](#3-solid-principles)
 4. [Clean Code](#4-clean-code)
-5. [Data Sources](#5-data-sources)
-6. [Repositories](#6-repositories)
-7. [Use Cases](#7-use-cases)
-8. [ViewModel](#8-viewmodel)
-9. [Jetpack Compose](#9-jetpack-compose)
-10. [Network Operations with OkHttp](#10-network-operations-with-okhttp)
-11. [Dependency Injection with Hilt](#11-dependency-injection-with-hilt)
-12. [Data Storage](#12-data-storage)
+5. [Threading, Coroutines & Dispatchers](#5-threading-coroutines--dispatchers)
+6. [Data Sources](#6-data-sources)
+7. [Repositories](#7-repositories)
+8. [Use Cases](#8-use-cases)
+9. [ViewModel](#9-viewmodel)
+10. [Jetpack Compose](#10-jetpack-compose)
+11. [Network Operations with OkHttp](#11-network-operations-with-okhttp)
+12. [Dependency Injection with Hilt](#12-dependency-injection-with-hilt)
+13. [Data Storage](#13-data-storage)
     - [Room](#room)
     - [SharedPreferences & SecureSharedPreferences](#sharedpreferences--securesharedpreferences)
-13. [Image Loading with COIL](#13-image-loading-with-coil)
+14. [Image Loading with COIL](#14-image-loading-with-coil)
 
 ---
 
@@ -723,7 +724,622 @@ suspend fun loadDashboard(): Dashboard = supervisorScope {
 
 ---
 
-## 5. Data Sources
+## 5. Threading, Coroutines & Dispatchers
+
+### What is Threading?
+
+A **thread** is an independent path of execution within a process. Android apps start with one thread — the **Main thread** (also called the **UI thread**). All UI rendering, touch event handling, and view updates happen here. The system enforces a strict rule: **any operation that blocks the main thread for more than ~16 ms causes a dropped frame; any block over ~5 seconds triggers an Application Not Responding (ANR) dialog.**
+
+The consequence is that all slow work — network calls, database queries, file I/O, complex computations — must be moved off the main thread. Kotlin Coroutines are the modern, idiomatic way to do this on Android.
+
+### What are Kotlin Coroutines?
+
+Coroutines are **lightweight, suspendable units of work** that can pause execution at suspension points (marked with the `suspend` keyword) without blocking the underlying thread. While a coroutine is suspended, its thread is free to do other work. When the suspended operation completes, the coroutine resumes — possibly on a different thread.
+
+**Why not just use threads directly?**
+
+| Problem | Threads | Coroutines |
+|---------|---------|------------|
+| Memory cost | ~1 MB per thread | ~few KB per coroutine |
+| Blocking | Block the OS thread | Suspend — thread is freed |
+| Cancellation | Manual, error-prone | Structured, automatic |
+| Error propagation | Uncaught exceptions crash the app | Propagated through the hierarchy |
+| Android integration | Manual lifecycle management | `viewModelScope`, `lifecycleScope` |
+
+You can run **millions** of coroutines simultaneously where only thousands of threads would exhaust available memory.
+
+### Gradle Dependencies
+
+```kotlin
+dependencies {
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+}
+```
+
+---
+
+### Suspend Functions
+
+A `suspend` function is one that can pause its execution without blocking a thread. It can only be called from another `suspend` function or from a coroutine builder.
+
+```kotlin
+// A regular function — blocks whichever thread calls it
+fun loadUserBlocking(id: String): User = api.getUser(id)  // blocks!
+
+// A suspend function — pauses the coroutine, frees the thread
+suspend fun loadUser(id: String): User = api.getUser(id)  // suspends ✓
+```
+
+Under the hood, the Kotlin compiler transforms `suspend` functions into state machines using **Continuation Passing Style (CPS)** — no new thread is created. The suspension point is just a scheduled callback managed by the coroutine runtime.
+
+```kotlin
+// How you write it
+suspend fun fetchAndSave(id: String): User {
+    val user = api.getUser(id)    // suspend point ①
+    db.save(user)                 // suspend point ②
+    return user
+}
+
+// What the compiler generates (simplified)
+fun fetchAndSave(id: String, continuation: Continuation<User>): Any {
+    // State machine with labels for each suspension point
+}
+```
+
+---
+
+### CoroutineScope and Structured Concurrency
+
+Every coroutine runs inside a **CoroutineScope**. The scope establishes the **lifetime** of coroutines — when the scope is cancelled, all coroutines inside it are cancelled automatically. This is **structured concurrency**: child coroutines cannot outlive their parent.
+
+```
+CoroutineScope (viewModelScope)
+├── launch { fetchUser() }           ← child coroutine
+│   └── withContext(IO) { db.query() } ← nested
+└── launch { fetchFeed() }            ← sibling coroutine
+```
+
+When `viewModelScope` is cancelled (ViewModel cleared), every child coroutine is cancelled immediately — no leaks, no stale callbacks.
+
+**Android-provided scopes:**
+
+```kotlin
+// ViewModel — cancelled when the ViewModel is cleared
+viewModelScope.launch { /* ... */ }
+
+// Fragment/Activity — cancelled when the lifecycle reaches DESTROYED
+lifecycleScope.launch { /* ... */ }
+
+// Fragment — cancelled when the view is DESTROYED (use for UI-bound work)
+viewLifecycleOwner.lifecycleScope.launch { /* ... */ }
+
+// Repeat while lifecycle is in a given state (e.g., started)
+lifecycleScope.launch {
+    repeatOnLifecycle(Lifecycle.State.STARTED) {
+        viewModel.uiState.collect { state -> render(state) }
+    }
+}
+```
+
+---
+
+### CoroutineContext
+
+A `CoroutineContext` is an indexed set of elements that configure a coroutine's behaviour. The most important elements are:
+
+| Element | Interface | Determines |
+|---------|-----------|-----------|
+| `Job` | `Job` / `SupervisorJob` | Lifecycle and cancellation |
+| `CoroutineDispatcher` | `CoroutineDispatcher` | Which thread(s) the coroutine runs on |
+| `CoroutineName` | `CoroutineName` | Debug name (shows in logs/debugger) |
+| `CoroutineExceptionHandler` | `CoroutineExceptionHandler` | Handles uncaught exceptions |
+
+Contexts combine with `+`:
+
+```kotlin
+val context = Dispatchers.IO + SupervisorJob() + CoroutineName("UserLoader") +
+    CoroutineExceptionHandler { _, throwable -> log.e("Uncaught", throwable) }
+
+val scope = CoroutineScope(context)
+```
+
+Child coroutines **inherit** context elements from their parent, but can override individual ones:
+
+```kotlin
+viewModelScope.launch {                        // inherits Dispatchers.Main
+    withContext(Dispatchers.IO) { db.query() } // overrides dispatcher locally
+    // back on Main here
+}
+```
+
+---
+
+### Dispatchers
+
+A **Dispatcher** determines which thread or thread pool a coroutine runs on. Always be explicit — never assume what thread you're on.
+
+#### `Dispatchers.Main`
+
+Runs on the Android **UI thread**. Use for updating UI state, collecting Flows in composables, or any work that must run on the main thread.
+
+```kotlin
+// viewModelScope uses Main by default
+viewModelScope.launch {    // running on Main
+    _uiState.value = UiState.Loading
+    val result = withContext(Dispatchers.IO) { repository.getUser(id) }
+    _uiState.value = UiState.Success(result)  // back on Main
+}
+```
+
+#### `Dispatchers.IO`
+
+Uses a shared thread pool optimised for **blocking I/O operations**: network calls, database reads/writes, file access. The pool can grow up to 64 threads (or the number of CPU cores, whichever is larger).
+
+```kotlin
+suspend fun loadUser(id: String): User = withContext(Dispatchers.IO) {
+    // Safe to block here — IO pool thread, not Main
+    apiService.getUser(id)
+}
+
+suspend fun readFile(path: String): String = withContext(Dispatchers.IO) {
+    File(path).readText()
+}
+```
+
+> **Note:** Room and Retrofit automatically handle their own dispatcher switching internally. You do not need to wrap them in `withContext(Dispatchers.IO)` when using `suspend` functions — but doing so is harmless and makes intent explicit.
+
+#### `Dispatchers.Default`
+
+Uses a thread pool sized to the **number of CPU cores**. Use for **CPU-intensive computations**: sorting large lists, parsing JSON, image processing, complex algorithms.
+
+```kotlin
+suspend fun sortUsers(users: List<User>): List<User> = withContext(Dispatchers.Default) {
+    users.sortedWith(compareBy({ it.name }, { it.email }))
+}
+
+suspend fun compressImage(bitmap: Bitmap): Bitmap = withContext(Dispatchers.Default) {
+    // CPU-bound work
+    bitmap.scale(0.5f).applyFilter(BlurFilter(radius = 8f))
+}
+```
+
+#### `Dispatchers.Unconfined`
+
+Runs in the calling thread until the first suspension point, then resumes in whichever thread the suspending function uses. **Avoid in production** — the thread it runs on is unpredictable, making it unsuitable for UI work or thread-sensitive operations. It is occasionally useful in unit tests.
+
+#### `Dispatchers.Main.immediate`
+
+Same as `Dispatchers.Main` but, if you are already on the main thread, the coroutine executes immediately without re-dispatching (no frame delay). Useful when you need to update the UI synchronously from main-thread code.
+
+```kotlin
+fun onButtonClick() {
+    viewModelScope.launch(Dispatchers.Main.immediate) {
+        _uiState.value = UiState.Loading   // immediate, no delay
+    }
+}
+```
+
+#### Summary Table
+
+| Dispatcher | Thread pool | Use for |
+|------------|------------|---------|
+| `Dispatchers.Main` | UI thread (1 thread) | UI updates, state emission |
+| `Dispatchers.Main.immediate` | UI thread (immediate) | Synchronous UI updates from main thread |
+| `Dispatchers.IO` | Up to 64 threads | Network, DB, file I/O |
+| `Dispatchers.Default` | CPU-core threads | Heavy computation, sorting, parsing |
+| `Dispatchers.Unconfined` | Caller's thread | Tests only — avoid in production |
+
+---
+
+### Coroutine Builders
+
+Builders are extension functions on `CoroutineScope` that launch new coroutines.
+
+#### `launch` — Fire and Forget
+
+Returns a `Job`. Use when you don't need a return value.
+
+```kotlin
+viewModelScope.launch {
+    repository.syncData()   // runs concurrently, result not used
+}
+
+// Store the Job to cancel it manually
+val job = viewModelScope.launch {
+    while (isActive) {
+        delay(5_000)
+        repository.refresh()
+    }
+}
+
+// Later:
+job.cancel()
+```
+
+#### `async` / `await` — Parallel Decomposition
+
+Returns a `Deferred<T>`. Use when you need a result and want to run multiple operations **concurrently**.
+
+```kotlin
+suspend fun loadDashboard(): Dashboard = coroutineScope {
+    // Both launch in parallel
+    val usersDeferred = async(Dispatchers.IO) { userRepository.getUsers() }
+    val statsDeferred = async(Dispatchers.IO) { statsRepository.getStats() }
+
+    // Suspend until both complete
+    Dashboard(
+        users = usersDeferred.await(),
+        stats = statsDeferred.await()
+    )
+}
+// Total time ≈ max(users time, stats time) — not sum
+```
+
+#### `withContext` — Switch Dispatcher
+
+Suspends the current coroutine, runs the block on a different dispatcher, then resumes on the original dispatcher. Does **not** create a new coroutine — it reuses the current one.
+
+```kotlin
+suspend fun getUserWithMapping(id: String): UserProfile {
+    val dto = withContext(Dispatchers.IO) { apiService.getUser(id) }  // IO
+    val profile = withContext(Dispatchers.Default) { dto.toProfile() } // CPU
+    return profile
+    // implicit: we're back on whatever dispatcher called this function
+}
+```
+
+#### `runBlocking` — Bridge to Blocking World
+
+**Blocks** the calling thread until the coroutine completes. **Never use in production Android code** — it will freeze the main thread. It exists for unit tests and `main()` functions.
+
+```kotlin
+// ✓ OK in tests
+@Test
+fun `user is loaded correctly`() = runBlocking {
+    val user = repository.getUser("1")
+    assertThat(user.name).isEqualTo("Alice")
+}
+
+// ✗ Never do this in an Activity, Fragment, or ViewModel
+runBlocking { repository.getUser("1") }  // freezes UI thread!
+```
+
+---
+
+### Job and SupervisorJob
+
+A `Job` represents the lifecycle of a coroutine and defines its parent-child relationships. When a `Job` is cancelled, all its children are cancelled.
+
+```kotlin
+val job = viewModelScope.launch {
+    launch { task1() }  // child 1
+    launch { task2() }  // child 2
+}
+
+job.cancel()   // cancels both task1 and task2
+job.join()     // suspends until job and all children complete
+```
+
+**`Job` vs `SupervisorJob`:**
+
+With a regular `Job`, if any child fails, the failure propagates to the parent and cancels all siblings:
+
+```kotlin
+// Regular Job — one failure cancels all
+coroutineScope {
+    launch { task1() }           // if task2 throws, task1 is cancelled
+    launch { task2() /* fails */ }
+}
+```
+
+With `SupervisorJob`, a child's failure is isolated — siblings continue running:
+
+```kotlin
+// SupervisorJob — failures are isolated
+supervisorScope {
+    launch { task1() }           // continues even if task2 throws
+    launch { task2() /* fails */ }
+}
+
+// viewModelScope and lifecycleScope use SupervisorJob internally
+```
+
+---
+
+### Coroutine Cancellation
+
+Cancellation in coroutines is **cooperative** — a coroutine must check for cancellation at suspension points. Built-in suspension functions (`delay`, `withContext`, Room queries, Retrofit calls) check for cancellation automatically. Long-running CPU-bound loops must check manually.
+
+```kotlin
+// Suspension points check automatically
+launch {
+    while (true) {
+        delay(1_000)     // checks isActive; throws CancellationException if cancelled
+        processData()
+    }
+}
+
+// CPU loop must check manually
+launch(Dispatchers.Default) {
+    for (item in massiveList) {
+        ensureActive()   // throws CancellationException if cancelled
+        processItem(item)
+    }
+}
+
+// isActive — non-throwing alternative
+launch(Dispatchers.Default) {
+    for (item in massiveList) {
+        if (!isActive) return@launch
+        processItem(item)
+    }
+}
+```
+
+**`CancellationException` must never be caught silently:**
+
+```kotlin
+// ✗ Bad — hides cancellation, coroutine never actually stops
+try {
+    someWork()
+} catch (e: Exception) {
+    log.e("error", e)  // swallows CancellationException!
+}
+
+// ✓ Good — re-throw CancellationException
+try {
+    someWork()
+} catch (e: CancellationException) {
+    throw e            // let structured concurrency handle it
+} catch (e: Exception) {
+    log.e("error", e)
+}
+
+// ✓ Or handle only non-cancellation failures
+try {
+    someWork()
+} catch (e: IOException) {
+    handleNetworkError(e)
+}
+```
+
+---
+
+### Error Handling
+
+#### `try/catch` inside coroutines
+
+```kotlin
+viewModelScope.launch {
+    try {
+        val user = repository.getUser(id)
+        _uiState.value = UiState.Success(user)
+    } catch (e: IOException) {
+        _uiState.value = UiState.Error("Network unavailable")
+    } catch (e: HttpException) {
+        _uiState.value = UiState.Error("Server error: ${e.code()}")
+    }
+}
+```
+
+#### `CoroutineExceptionHandler`
+
+Catches **uncaught exceptions** from `launch` blocks (not from `async` — those surface via `await`). Install it on the scope or the individual `launch` call:
+
+```kotlin
+val handler = CoroutineExceptionHandler { context, throwable ->
+    log.e("Coroutine", "Unhandled exception in ${context[CoroutineName]}", throwable)
+    _events.tryEmit(AppEvent.ShowCrashBanner)
+}
+
+viewModelScope.launch(handler) {
+    riskyOperation()   // exception here is caught by handler, not propagated
+}
+```
+
+#### `supervisorScope` for parallel tasks with independent failure
+
+```kotlin
+suspend fun loadDashboard(): Dashboard = supervisorScope {
+    val usersDeferred  = async { userRepository.getUsers() }
+    val statsDeferred  = async { statsRepository.getStats() }   // may fail
+    val feedDeferred   = async { feedRepository.getFeed() }
+
+    Dashboard(
+        users  = runCatching { usersDeferred.await() }.getOrDefault(emptyList()),
+        stats  = runCatching { statsDeferred.await() }.getOrDefault(Stats.empty()),
+        feed   = runCatching { feedDeferred.await() }.getOrDefault(emptyList())
+    )
+    // If stats fails, users and feed still complete normally
+}
+```
+
+---
+
+### Flow — Reactive Streams with Coroutines
+
+`Flow<T>` is the coroutine-native reactive streams API. A Flow is a **cold** stream — it only starts emitting when collected, and each collector gets its own independent execution.
+
+#### Building a Flow
+
+```kotlin
+// flow builder — emit values lazily
+fun observePrices(): Flow<Double> = flow {
+    while (true) {
+        val price = api.getPrice()  // suspend call
+        emit(price)
+        delay(5_000)
+    }
+}
+
+// flowOf — emit a fixed set of values
+val singleFlow: Flow<Int> = flowOf(1, 2, 3)
+
+// asFlow — convert a collection
+val listFlow: Flow<String> = listOf("a", "b", "c").asFlow()
+
+// channelFlow — emit from multiple coroutines
+fun observeMultipleSources(): Flow<Event> = channelFlow {
+    launch { api.observeEvents().collect { send(it) } }
+    launch { db.observeLocalEvents().collect { send(it) } }
+}
+```
+
+#### Operators
+
+```kotlin
+observePrices()
+    .filter { it > 0.0 }                            // discard negatives
+    .map { price -> "$${String.format("%.2f", price)}" } // transform
+    .distinctUntilChanged()                          // skip duplicate emissions
+    .debounce(300)                                   // wait 300ms before emitting
+    .onEach { log.d("Price updated: $it") }          // side effect
+    .catch { e -> emit("Error: ${e.message}") }      // handle errors
+    .collect { displayPrice(it) }                    // terminal — starts the flow
+```
+
+#### `flowOn` — Switch the Upstream Dispatcher
+
+`flowOn` changes the dispatcher of everything **above** it in the chain, while everything below runs on the original dispatcher:
+
+```kotlin
+fun observeUsers(): Flow<List<User>> = userDao.observeAll()   // Room produces on IO
+    .map { entities -> entities.map { it.toDomain() } }       // mapping on IO
+    .flowOn(Dispatchers.IO)                                    // ← IO applies to lines above
+    .map { users -> users.sortedBy { it.name } }              // this runs on Default (caller)
+    .flowOn(Dispatchers.Default)
+// Collector receives sorted users on its own dispatcher (usually Main)
+```
+
+#### `StateFlow` — Hot, Always Has a Value
+
+`StateFlow` is a hot observable state holder. It always has a current value, replays the latest value to new collectors, and never completes.
+
+```kotlin
+// In ViewModel
+private val _uiState = MutableStateFlow<UserUiState>(UserUiState.Loading)
+val uiState: StateFlow<UserUiState> = _uiState.asStateFlow()
+
+// Update from any coroutine
+viewModelScope.launch { _uiState.value = UserUiState.Success(user) }
+
+// Collect in Compose (lifecycle-aware)
+val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+// Convert a cold Flow into StateFlow
+val sortedUsers: StateFlow<List<User>> = repository.observeUsers()
+    .map { it.sortedBy(User::name) }
+    .stateIn(
+        scope         = viewModelScope,
+        started       = SharingStarted.WhileSubscribed(5_000), // keep active 5s after last collector
+        initialValue  = emptyList()
+    )
+```
+
+#### `SharedFlow` — Hot, No Value, Multiple Subscribers
+
+`SharedFlow` is a hot stream with no current-value concept. It broadcasts events to all active collectors. Used for one-shot events (navigation, snackbars) where caching the last value would be wrong.
+
+```kotlin
+private val _events = MutableSharedFlow<UiEvent>(extraBufferCapacity = 1)
+val events: SharedFlow<UiEvent> = _events.asSharedFlow()
+
+// Emit from any coroutine
+viewModelScope.launch { _events.emit(UiEvent.ShowSnackbar("Saved!")) }
+// or non-suspending:
+_events.tryEmit(UiEvent.ShowSnackbar("Saved!"))
+
+// Collect in Compose
+LaunchedEffect(Unit) {
+    viewModel.events.collect { event ->
+        when (event) {
+            is UiEvent.ShowSnackbar -> snackbarHostState.showSnackbar(event.message)
+            is UiEvent.Navigate     -> navController.navigate(event.route)
+        }
+    }
+}
+```
+
+#### Cold vs Hot Flows at a Glance
+
+| | `Flow` (cold) | `StateFlow` (hot) | `SharedFlow` (hot) |
+|---|---|---|---|
+| Starts on | First collect | Creation | Creation |
+| Replays | Nothing | Latest value | Configurable (default 0) |
+| Completes | Yes | Never | Never |
+| Multiple collectors | Independent executions | Share the same value | Share the same events |
+| Use for | Data pipelines, DB streams | UI state | One-shot events |
+
+---
+
+### Practical Patterns
+
+#### Pattern 1: Repository emitting data from Room
+
+```kotlin
+// Repository — Room runs on IO, we map on Default, caller receives on its dispatcher
+fun observeUsers(): Flow<List<User>> = localDataSource.observeAllUsers()
+    .map { entities -> entities.map { it.toDomain() } }
+    .flowOn(Dispatchers.Default)
+```
+
+#### Pattern 2: ViewModel converting a cold Flow to StateFlow
+
+```kotlin
+val users: StateFlow<List<User>> = userRepository.observeUsers()
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+```
+
+#### Pattern 3: Parallel network calls with independent error handling
+
+```kotlin
+suspend fun loadScreen(): ScreenData = supervisorScope {
+    val profileDeferred = async(Dispatchers.IO) { profileRepository.get() }
+    val feedDeferred    = async(Dispatchers.IO) { feedRepository.get() }
+
+    ScreenData(
+        profile = profileDeferred.await(),
+        feed    = runCatching { feedDeferred.await() }.getOrDefault(emptyList())
+    )
+}
+```
+
+#### Pattern 4: Debounced search with `flatMapLatest`
+
+```kotlin
+val results: StateFlow<List<User>> = searchQuery
+    .debounce(300)
+    .filter { it.length >= 2 }
+    .distinctUntilChanged()
+    .flatMapLatest { query ->               // cancels previous search on new input
+        userRepository.search(query)
+            .catch { emit(emptyList()) }
+    }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+```
+
+#### Pattern 5: Timeout and retry
+
+```kotlin
+suspend fun fetchWithRetry(id: String): User = withTimeout(10_000) {
+    retry(times = 3, delayMs = 1_000) {
+        repository.getUser(id).getOrThrow()
+    }
+}
+
+suspend fun <T> retry(times: Int, delayMs: Long, block: suspend () -> T): T {
+    repeat(times - 1) { attempt ->
+        try { return block() } catch (e: IOException) { delay(delayMs * (attempt + 1)) }
+    }
+    return block()   // last attempt — let the exception propagate
+}
+```
+
+---
+
+## 6. Data Sources
 
 ### What are Data Sources?
 
@@ -854,7 +1470,7 @@ fun User.toEntity()       = UserEntity(id, name, email, avatarUrl)
 
 ---
 
-## 6. Repositories
+## 7. Repositories
 
 ### What is a Repository?
 
@@ -961,7 +1577,7 @@ fun getUserCacheFirst(id: String): Flow<Result<User>> = flow {
 
 ---
 
-## 7. Use Cases
+## 8. Use Cases
 
 ### What is a Use Case?
 
@@ -1074,7 +1690,7 @@ class RegisterUserUseCaseTest {
 
 ---
 
-## 8. ViewModel
+## 9. ViewModel
 
 ### What is a ViewModel?
 
@@ -1203,7 +1819,7 @@ val uiState: StateFlow<DashboardUiState> = combine(
 
 ---
 
-## 9. Jetpack Compose
+## 10. Jetpack Compose
 
 ### What is Jetpack Compose?
 
@@ -1421,7 +2037,7 @@ val showScrollToTop by remember { derivedStateOf { listState.firstVisibleItemInd
 
 ---
 
-## 10. Network Operations with OkHttp
+## 11. Network Operations with OkHttp
 
 ### What is OkHttp?
 
@@ -1617,7 +2233,7 @@ class UserPagingSource @Inject constructor(
 
 ---
 
-## 11. Dependency Injection with Hilt
+## 12. Dependency Injection with Hilt
 
 ### What is Hilt?
 
@@ -1886,7 +2502,7 @@ object FakeNetworkModule {
 
 ---
 
-## 12. Data Storage
+## 13. Data Storage
 
 ### Room
 
@@ -2322,7 +2938,7 @@ class SettingsRepository @Inject constructor(
 
 ---
 
-## 13. Image Loading with COIL
+## 14. Image Loading with COIL
 
 ### What is COIL?
 
