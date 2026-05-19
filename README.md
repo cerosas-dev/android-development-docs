@@ -31,6 +31,13 @@ This repo currently covers two mobile platforms and two AI coding-agent engines.
 | [`claude-code.md`](./claude-code.md) | Guide to installing Claude Code on macOS / Linux / Windows, wiring this repository's scaffolding skills into any iOS or Android project, and using them to generate code that adheres to the platform reference docs below. | 5 |
 | [`cursor-cli.md`](./cursor-cli.md) | Guide to installing Cursor CLI (`cursor-agent`) on macOS / Linux / WSL2, wiring this repository's Cursor-flavoured skills (under `./cursor-skills/`) into any Android project, and using them to generate code that adheres to the platform reference docs below. | 5 |
 
+## A typical workflow
+
+1. Read [`android_clean_architecture.md`](./android_clean_architecture.md) §1 (MVVM) and §11 (Compose — Screen / Content Pattern) to ground yourself in the architecture.
+2. Pick your engine guide ([`claude-code.md`](./claude-code.md) or [`cursor-cli.md`](./cursor-cli.md)) and install the matching skill suite into your project's `.claude/skills/` or `.cursor/skills/`.
+3. Invoke skills bottom-up through the architecture: `/android-create-module` → `/android-add-http-datasource` → `/android-add-repository` → `/android-add-use-case` → `/android-add-view-model` → `/android-add-content` → `/android-add-screen`.
+4. Cover with tests horizontally across the pyramid: `/android-add-unit-test` → `/android-add-ui-test` → `/android-add-integration-test` (read [`android_testing.md`](./android_testing.md) §8 first if you're new to the Screen vs Content split).
+
 ## License
 
 This document is distributed under the **GNU General Public License v3.0 (GPL-3.0)**.
