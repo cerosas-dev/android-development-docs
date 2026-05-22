@@ -118,11 +118,11 @@ Skills sit between the two: they are *on-demand* (loaded only when the descripti
 
 ### 3.2 How the Skills Are Organised
 
-Every skill in this repo is a single `SKILL.md` file inside a platform-scoped folder — `./claude-skills/<skill-name>/` for Android, `./ios/claude-skills/<skill-name>/` for iOS — with no auxiliary `references/`, `scripts/`, or `assets/` directories, because these skills are pure procedure. Each one cross-references specific section numbers in the platform reference docs (`android_clean_architecture.md` + `android_testing.md` for Android, `ios/ios_clean_architecture.md` + `ios/ios_testing.md` for iOS) so the generated code matches the canonical patterns exactly.
+Every skill in this repo is a single `SKILL.md` file inside a platform-scoped folder — `./claude-skills/<skill-name>/` for Android. Each one cross-references specific section numbers in the platform reference docs (`android_clean_architecture.md` + `android_testing.md` for Android) so the generated code matches the canonical patterns exactly.
 
-Each platform ships ten skills, dividing cleanly into three groups:
+Ten skills are shipped, dividing cleanly into three groups:
 
-- **Scaffolding (1 skill).** Bootstraps the Clean Architecture folder layout (`android-create-module` / `ios-create-module`).
+- **Scaffolding (1 skill).** Bootstraps the Clean Architecture folder layout (`android-create-module`).
 - **Layer generators (6 skills).** One per architectural layer — HTTP DataSource, Repository, UseCase, ViewModel, Content, Screen — applied in dependency order.
 - **Test generators (3 skills).** Unit tests (host-process), UI tests (Content + components), Integration tests (Screen + navigation).
 
@@ -268,30 +268,9 @@ The table below lists every skill in the order you would typically invoke them w
 
 ---
 
-### 3.4 iOS Skill Catalogue
-
-The iOS skills mirror the Android catalogue one-for-one, with the `ios-` prefix and slash command. They live under `./ios/claude-skills/` and cite section numbers in `ios/ios_clean_architecture.md` and `ios/ios_testing.md`. The skill bodies are scaffolded today and will be fully authored in Phases 4–5 of the iOS replication plan; the frontmatter `description` lines are final and already drive trigger matching.
-
-| # | Skill | Slash command | Generates |
-|---|-------|--------------|-----------|
-| 1 | `ios-create-module` | `/ios-create-module` | Clean Architecture folder layout (`DI/`, `Domain/`, `Data/`, `Presentation/`) as a local SPM package or a feature folder inside an existing target. |
-| 2 | `ios-add-http-datasource` | `/ios-add-http-datasource` | `URLSession`-based endpoint enum, `RemoteDataSource` protocol + impl, Codable DTOs, Factory `Container` registration. |
-| 3 | `ios-add-repository` | `/ios-add-repository` | Domain-layer protocol, data-layer implementation, Factory `Container` binding. |
-| 4 | `ios-add-use-case` | `/ios-add-use-case` | Business-operation conforming to `UseCase` / `FlowUseCase` / `NoParamsUseCase` (the latter two return `AsyncSequence`). |
-| 5 | `ios-add-view-model` | `/ios-add-view-model` | `@Observable` `@MainActor` class + `UiState` + `Event` enum surfaced as `AsyncStream`. |
-| 6 | `ios-add-content` | `/ios-add-content` | Stateless `XxxContent: View` with `#Preview` per state. |
-| 7 | `ios-add-screen` | `/ios-add-screen` | Stateful `XxxScreen: View` wiring ViewModel via Factory → Content. |
-| 8 | `ios-add-unit-test` | `/ios-add-unit-test` | Swift Testing unit tests for DataSources, Repositories, UseCases, ViewModels. |
-| 9 | `ios-add-ui-test` | `/ios-add-ui-test` | ViewInspector-based UI tests for `XxxContent` and reusable SwiftUI components. |
-| 10 | `ios-add-integration-test` | `/ios-add-integration-test` | Integration tests for `XxxScreen` and `NavigationStack` flows via Factory `Container.reset()` + fakes, plus XCUITest variants. |
-
-Per-skill detail blocks (matching the Android format above) will be added once the corresponding `ios/ios_*.md` sections and SKILL.md bodies are fleshed out.
-
----
-
 ## 4. Installing the Skills in Another Project
 
-The examples in this section show the Android install path. **The same mechanic applies to iOS** — wherever an example copies `claude-skills/` and the two `android_*.md` references, swap in `ios/claude-skills/` and the two `ios/ios_*.md` references instead. Project layout, scopes, refresh strategies, and skill-resolution rules are identical across platforms.
+The examples in this section show the Android install path. Project layout, scopes, refresh strategies, and skill-resolution rules are identical across platforms.
 
 ### 4.1 Scope: Project vs User
 
